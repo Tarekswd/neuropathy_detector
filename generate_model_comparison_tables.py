@@ -81,14 +81,6 @@ def load_metrics(model_type, algorithm, task):
             print(f"Metrics file not found for {model_type} {algorithm} {task} (looked in {model_dir})")
             return None
 
-        metric_key = METRIC_KEYS.get(model_type, 'test_metrics')
-
-        # Try to return the holdout test metrics; fall back to other keys if needed
-        if metric_key in data:
-            return data[metric_key]
-        # some files store cv summaries under `cv_metrics_summary` with mean/std
-        if 'cv_metrics_summary' in data:
-            return {'__cv_summary__': data['cv_metrics_summary']}
         return data
     except Exception as e:
         print(f"Error loading {model_type} {algorithm} {task}: {e}")
@@ -112,30 +104,29 @@ def create_comparison_table(model_type, task):
         row = {"Algorithm": algo.upper()}
         
         for metric in metrics:
-            # prefer holdout test metrics
-            if isinstance(metrics_dict, dict) and metric in metrics_dict:
-                value = metrics_dict[metric]
-                row[metric] = f"{value:.4f}" if isinstance(value, (int, float)) else str(value)
-                continue
-
-            # if a CV summary was returned inside a wrapper key
-            if isinstance(metrics_dict, dict) and '__cv_summary__' in metrics_dict and metric in metrics_dict['__cv_summary__']:
-                val = metrics_dict['__cv_summary__'][metric]
-                if isinstance(val, dict) and 'mean' in val:
-                    row[metric] = f"{val['mean']:.4f} ± {val.get('std', 0):.4f}"
-                    continue
-
-            # finally, some files nest metrics under other keys (train/test), try searching
             found = False
-            for k in ['test_metrics', 'train_metrics', 'cv_metrics_summary']:
-                if k in metrics_dict and isinstance(metrics_dict[k], dict) and metric in metrics_dict[k]:
-                    v = metrics_dict[k][metric]
-                    if isinstance(v, dict) and 'mean' in v:
-                        row[metric] = f"{v['mean']:.4f} ± {v.get('std', 0):.4f}"
-                    else:
-                        row[metric] = f"{v:.4f}" if isinstance(v, (int, float)) else str(v)
-                    found = True
-                    break
+            # Search order: cv_metrics_summary first (since we want mean +- sd), then test_metrics, then train_metrics
+            for k in ['cv_metrics_summary', 'test_metrics', 'train_metrics']:
+                if k in metrics_dict and isinstance(metrics_dict[k], dict):
+                    # handle recall/sensitivity mapping
+                    metric_key = metric
+                    if metric == "recall" and "recall" not in metrics_dict[k] and "sensitivity" in metrics_dict[k]:
+                        metric_key = "sensitivity"
+                    elif metric == "sensitivity" and "sensitivity" not in metrics_dict[k] and "recall" in metrics_dict[k]:
+                        metric_key = "recall"
+                        
+                    if metric_key in metrics_dict[k]:
+                        v = metrics_dict[k][metric_key]
+                        if isinstance(v, dict) and 'mean' in v:
+                            mean_val = v['mean']
+                            std_val = v.get('std', 0.0)
+                            if std_val is None:
+                                std_val = 0.0
+                            row[metric] = f"{mean_val:.4f} ± {std_val:.4f}"
+                        else:
+                            row[metric] = f"{v:.4f}" if isinstance(v, (int, float)) else str(v)
+                        found = True
+                        break
             if not found:
                 row[metric] = "N/A"
         
@@ -218,17 +209,17 @@ def main():
             df = create_comparison_table(model_type, task)
             
             if df.empty:
-                print(f"  ⚠ No data found for this configuration")
+                print(f"  [WARNING] No data found for this configuration")
                 continue
             
             # Render and save
             output_file = render_table_as_image(df, title, filename)
-            print(f"  ✓ Saved: {filename}")
+            print(f"  [SUCCESS] Saved: {filename}")
             print(f"  Algorithms: {', '.join(df['Algorithm'].str.lower().tolist())}")
             print(f"  Metrics: {len(df.columns) - 1}")
     
     print("\n" + "=" * 80)
-    print(f"✓ Generated {table_count} comparison tables in: {OUTPUT_DIR}")
+    print(f"[SUCCESS] Generated {table_count} comparison tables in: {OUTPUT_DIR}")
     print("=" * 80)
 
 

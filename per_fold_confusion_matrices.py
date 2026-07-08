@@ -196,10 +196,15 @@ def run():
             except Exception:
                 return {}
 
-        png_dir = OUT_DIR / "png" / "event"
+        png_dir_event = OUT_DIR / "png" / "event"
         for fold_idx, cm in enumerate(cms_event, start=1):
-            png_path = png_dir / f"{Path(tf).stem}_fold{fold_idx}_confusion.png"
-            save_confusion_matrix_png(cm, png_path, title=f"{Path(tf).stem} fold {fold_idx}")
+            png_path = png_dir_event / f"{Path(tf).stem}_fold{fold_idx}_confusion.png"
+            save_confusion_matrix_png(cm, png_path, title=f"{Path(tf).stem} fold {fold_idx} (Event)")
+
+        png_dir_grouped = OUT_DIR / "png" / "grouped"
+        for fold_idx, cm in enumerate(cms_grouped, start=1):
+            png_path = png_dir_grouped / f"{Path(tf).stem}_fold{fold_idx}_confusion.png"
+            save_confusion_matrix_png(cm, png_path, title=f"{Path(tf).stem} fold {fold_idx} (Grouped)")
 
         out = {
             "artifact": tf,
