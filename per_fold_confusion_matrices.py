@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import glob
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 import numpy as np
@@ -13,6 +14,11 @@ from sklearn.base import clone
 from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix
 
 import pandas as pd
+
+# Ensure project root is on sys.path so 'models' package is importable
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from models.model_builders import MULTICLASS_LABELS
 
@@ -201,6 +207,22 @@ def run():
             png_path = png_dir_event / f"{Path(tf).stem}_fold{fold_idx}_confusion.png"
             save_confusion_matrix_png(cm, png_path, title=f"{Path(tf).stem} fold {fold_idx} (Event)")
 
+        # Summed (accumulated) confusion matrix across all folds — ungrouped / event-level
+        summed_event_cm = None
+        for cm in cms_event:
+            if summed_event_cm is None:
+                summed_event_cm = cm.copy()
+            else:
+                summed_event_cm = summed_event_cm.add(cm, fill_value=0).astype(int)
+        if summed_event_cm is not None:
+            summed_png_path = png_dir_event / f"{Path(tf).stem}_summed_confusion.png"
+            save_confusion_matrix_png(
+                summed_event_cm,
+                summed_png_path,
+                title=f"{Path(tf).stem} Summed over {len(cms_event)} Folds (Event)",
+            )
+            print("  Summed event confusion matrix ->", summed_png_path)
+
         png_dir_grouped = OUT_DIR / "png" / "grouped"
         for fold_idx, cm in enumerate(cms_grouped, start=1):
             png_path = png_dir_grouped / f"{Path(tf).stem}_fold{fold_idx}_confusion.png"
@@ -212,6 +234,7 @@ def run():
             "task": task,
             "best_params": best_params,
             "per_fold_event_confusion": [_cm_to_dict(cm) for cm in cms_event],
+            "summed_event_confusion": _cm_to_dict(summed_event_cm) if summed_event_cm is not None else {},
             "per_fold_grouped_confusion": [_cm_to_dict(cm) for cm in cms_grouped],
         }
 
