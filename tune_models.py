@@ -314,10 +314,12 @@ def main():
                         stacked[i, : m.shape[0], : m.shape[1]] = m
                     mean_mat = stacked.mean(axis=0).tolist()
                     std_mat = stacked.std(axis=0).tolist()
+                    sum_mat = stacked.sum(axis=0).tolist()
                     cv_summary[key] = {
                         "per_fold": [m.tolist() for m in mats],
                         "mean_matrix": mean_mat,
                         "std_matrix": std_mat,
+                        "sum_matrix": sum_mat,
                     }
                 else:
                     # numeric metrics; some entries (like AUC) may be None
@@ -349,30 +351,9 @@ def main():
             train_metrics = evaluate_pipeline(best_pipeline, X_train, y_train, task)
             test_metrics = evaluate_pipeline(best_pipeline, X_test, y_test, task)
 
-            # Group test events by subject_id and evaluate at patient (subject) level
-            try:
-                df_test = X_test.copy()
-                # ensure index-aligned labels and groups
-                df_test = pd.DataFrame(df_test)
-                df_test["subject_id"] = pd.Series(groups_test)
-                df_test["label"] = pd.Series(y_test.values)
-
-                grouped = df_test.groupby("subject_id")
-                grouped_X_test = grouped[feature_cols].mean()
-
-                # For subject-level label, take mode (most common event label); fallback to first
-                def _mode_or_first(s):
-                    m = s.mode()
-                    return int(m.iloc[0]) if not m.empty else int(s.iloc[0])
-
-                grouped_y_test = grouped["label"].agg(_mode_or_first)
-                grouped_y_test = grouped_y_test.astype(int)
-
-                grouped_test_metrics = evaluate_pipeline(best_pipeline, grouped_X_test, grouped_y_test, task)
-                grouped_test_feature_stats = summarize_feature_statistics(grouped_X_test, feature_cols)
-            except Exception:
-                grouped_test_metrics = None
-                grouped_test_feature_stats = []
+            # Do not test the models on grouped data, only on the ungrouped data
+            grouped_test_metrics = None
+            grouped_test_feature_stats = []
 
             train_feature_stats = summarize_feature_statistics(X_train, feature_cols)
             test_feature_stats = summarize_feature_statistics(X_test, feature_cols)

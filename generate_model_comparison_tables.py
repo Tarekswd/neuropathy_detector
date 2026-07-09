@@ -1,6 +1,6 @@
 """
-Generate 6 comparison tables (as PNG images) for model performance metrics
-- 3 model types: tuned, grouped_tuned, grouped_sudden
+Generate 4 comparison tables (as PNG images) for model performance metrics
+- 2 model types: tuned, grouped_tuned
 - 2 tasks: binary, multiclass
 - 5 algorithms per table: SVM, Random Forest, Logistic Regression, XGBoost, CatBoost
 """
@@ -17,14 +17,12 @@ ALGORITHMS = ["svm", "rf", "lr", "xgb", "catboost"]
 TASKS = ["binary", "multiclass"]
 MODEL_TYPES = {
     "tuned": "models/tuned",
-    "grouped_tuned": "models/grouped_tuned",
-    "grouped_sudden": "models/grouped_models_sudden"
+    "grouped_tuned": "models/grouped_tuned"
 }
 METRIC_KEYS = {
     # most metric files use the `test_metrics` key for holdout results
     "tuned": "test_metrics",
-    "grouped_tuned": "test_metrics",
-    "grouped_sudden": "test_metrics"
+    "grouped_tuned": "test_metrics"
 }
 OUTPUT_DIR = Path("model_comparison_tables")
 

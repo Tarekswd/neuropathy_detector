@@ -181,6 +181,14 @@ def generate_model_report(model_type, model_name, task_name, metrics_data):
                         report.append(f"    Fold {fold_idx}: N/A")
         report.append("")
         
+        if "confusion_matrix" in cv_summary and "sum_matrix" in cv_summary["confusion_matrix"]:
+            report.append("CROSS-VALIDATION SUMMED CONFUSION MATRIX")
+            report.append("-" * 100)
+            sum_mat = cv_summary["confusion_matrix"]["sum_matrix"]
+            for i, row in enumerate(sum_mat):
+                report.append(f"  Row {i}: {row}")
+            report.append("")
+        
         # ---- Summary Statistics ----
         if model_type != "grouped_sudden":
             report.append("SUMMARY STATISTICS")
@@ -220,7 +228,7 @@ def generate_model_report(model_type, model_name, task_name, metrics_data):
         for i, row in enumerate(matrix):
             report.append(f"  Row {i}: {row}")
         report.append("")
-    elif "confusion_matrix" in test_metrics:
+    elif test_metrics and "confusion_matrix" in test_metrics:
         report.append("CONFUSION MATRIX")
         report.append("-" * 100)
         cm = test_metrics["confusion_matrix"]
@@ -255,7 +263,7 @@ def main():
         model_dir = config["dir"]
         
         if not model_dir.exists():
-            print(f"⚠ Skipping {model_type}: directory not found ({model_dir})")
+            print(f"[WARNING] Skipping {model_type}: directory not found ({model_dir})")
             continue
         
         print(f"\n{'='*80}")
@@ -270,7 +278,7 @@ def main():
                 metrics_path = model_dir / metrics_filename
                 
                 if not metrics_path.exists():
-                    print(f"  ⚠ {model_name} ({task_name}): metrics file not found")
+                    print(f"  [WARNING] {model_name} ({task_name}): metrics file not found")
                     continue
                 
                 # Read metrics
@@ -287,11 +295,11 @@ def main():
                 with open(report_path, "w") as f:
                     f.write(report_text)
                 
-                print(f"  ✓ {model_name:10s} ({task_name:10s}) -> {report_filename}")
+                print(f"  [OK] {model_name:10s} ({task_name:10s}) -> {report_filename}")
                 report_count += 1
     
     print(f"\n{'='*80}")
-    print(f"✓ Generated {report_count} reports in: {REPORTS_DIR}")
+    print(f"[OK] Generated {report_count} reports in: {REPORTS_DIR}")
     print(f"{'='*80}")
     
     # Create a summary index file
@@ -326,7 +334,7 @@ def create_index_file(total_reports):
     with open(index_path, "w") as f:
         f.write("\n".join(lines))
     
-    print(f"✓ Index file created: {index_path}")
+    print(f"[OK] Index file created: {index_path}")
 
 
 if __name__ == "__main__":
