@@ -31,41 +31,35 @@ This repository contains a complete, end-to-end ML workflow that:
 ## Repository Structure
 
 ```
-for_github/
+neuropathy_detector/
 │
-├── Data Preparation
-│   ├── xml_fix.py                             # Repair malformed Zebris XML exports
-│   ├── npy_fix.py                             # Normalize and correct raw .npy pressure maps
-│   ├── extract_npy_features.py                # Extract per-region biomechanical features
-│   └── extract_grouped_footprint_features.py  # Feature extraction for grouped patient data
+├── xml_fix.py                             # Repair malformed Zebris XML exports
+├── npy_fix.py                             # Normalize and correct raw .npy pressure maps using horizantal flipping and fpa 
+├── extract_npy_features.py                # Extract per-region biomechanical features
+├── extract_grouped_footprint_features.py  # Feature extraction for grouped patient data
 │
-├── Visualization
-│   ├── plot_xml_footprints.py                 # Render plantar pressure footprints from XML
-│   ├── plotting_npy_pics.py                   # Visualize .npy pressure map images
-│   ├── plotting_npy_graph.py                  # Time-series and metric graphs from .npy data
-│   ├── plot_descriptive_counts.py             # Descriptive statistics and count plots
-│   ├── plot_confusion_matrices.py             # Confusion matrix visualizations
-│   ├── generate_grouped_confusion_matrices.py # Per-group confusion matrix generation
-│   ├── plot_common.py                         # Shared plotting utilities
-│   └── run_all_plots.py                       # Orchestrator: run all visualization scripts
+├── plot_xml_footprints.py                 # Render plantar pressure footprints from XML
+├── plotting_npy_pics.py                   # Visualize .npy pressure map images
+├── plotting_npy_graph.py                  # Time-series and metric graphs from .npy data
+├── plot_descriptive_counts.py             # Descriptive statistics and count plots
+├── plot_confusion_matrices.py             # Confusion matrix visualizations
+├── generate_grouped_confusion_matrices.py # Per-group confusion matrix generation
+├── plot_common.py                         # Shared plotting utilities
+├── run_all_plots.py                       # Orchestrator: run all visualization scripts
 │
-├── Model Training & Tuning
-│   ├── model_builders.py                      # Model factory (LR, SVM, RF, XGBoost, CatBoost)
-│   ├── training_utils.py                      # Pipeline builder, cross-validation, metrics
-│   ├── tune_models.py                         # GridSearchCV tuning — ungrouped features
-│   └── tune_grouped_footprints.py             # GridSearchCV tuning — grouped footprint features
+├── model_builders.py                      # Model factory (LR, SVM, RF, XGBoost, CatBoost)
+├── training_utils.py                      # Pipeline builder, cross-validation, metrics
+├── tune_models.py                         # GridSearchCV tuning — ungrouped features
+├── tune_grouped_footprints.py             # GridSearchCV tuning — grouped footprint features
 │
-├── Evaluation
-│   ├── evaluate_tuned_models.py               # Evaluate best tuned models on held-out test set
-│   ├── evaluate_tuned_on_grouped.py           # Evaluate tuned models on grouped data splits
-│   ├── per_fold_confusion_matrices.py         # Confusion matrices per CV fold
-│   └── grouped_data_models_fold_confusion_matrices.py  # Fold-level matrices for grouped models
+├── evaluate_tuned_models.py               # Evaluate best tuned models on held-out test set
+├── evaluate_tuned_on_grouped.py           # Evaluate tuned models on grouped data splits
+├── per_fold_confusion_matrices.py         # Confusion matrices per CV fold
+├── grouped_data_models_fold_confusion_matrices.py  # Fold-level matrices for grouped models
 │
-└── Reporting & Analysis
-    ├── generate_model_reports.py              # Full per-model performance reports
-    ├── generate_model_comparison_tables.py    # Side-by-side model comparison tables
-    ├── generate_hyperparam_reports.py         # Hyperparameter search result summaries
-    └── update_report_metrics.py              # Refresh metric values in existing reports
+├── generate_model_reports.py              # Full per-model performance reports
+├── generate_model_comparison_tables.py    # Side-by-side model comparison tables
+└── generate_hyperparam_reports.py         # Hyperparameter search result summaries
 ```
 
 ---
