@@ -41,11 +41,12 @@ neuropathy_detector/
 ├── plot_xml_footprints.py                 # Render plantar pressure footprints from XML
 ├── plotting_npy_pics.py                   # Visualize .npy pressure map images
 ├── plotting_npy_graph.py                  # Time-series and metric graphs from .npy data
+├── plot_features_grid.py                  # Generate a grid distribution plot of all 20 features
 ├── plot_descriptive_counts.py             # Descriptive statistics and count plots
 ├── plot_confusion_matrices.py             # Confusion matrix visualizations
 ├── generate_grouped_confusion_matrices.py # Per-group confusion matrix generation
 ├── plot_common.py                         # Shared plotting utilities
-├── run_all_plots.py                       # Orchestrator: run all visualization scripts
+└── run_all_plots.py                       # Orchestrator: run all visualization scripts
 │
 ├── model_builders.py                      # Model factory (LR, SVM, RF, XGBoost, CatBoost)
 ├── training_utils.py                      # Pipeline builder, cross-validation, metrics
