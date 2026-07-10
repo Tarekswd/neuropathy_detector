@@ -34,12 +34,49 @@ except Exception:
     from sklearn.model_selection import StratifiedGroupKFold
     FAST_SEARCH_SETTINGS = {}
 
+# Path to the full-cohort dataset produced by extract_npy_features.py
+# (train + test rows combined, z-normalised with train stats, tagged with 'split').
+DEFAULT_ALL_PATH = PROJECT_ROOT / "ml_features" / "npy_features_all.csv"
+
 
 def load_metrics_files():
     # target tuned outputs (joblib) or metrics jsons
     tuned_files = sorted(glob.glob(str(TUNED_DIR / "*_tuned.joblib")))
     metrics_files = sorted(glob.glob(str(TUNED_DIR / "*_metrics.json")))
     return tuned_files, metrics_files
+
+
+def load_all_dataset(all_path: Path, task: str):
+    """Load the full-cohort feature CSV (train + test combined).
+
+    The 'split' tag column is stripped before returning so the DataFrame
+    has the same schema as the individual train/test CSVs.
+    Returns (X, y, groups, feature_cols).
+    """
+    from models.training_utils import METADATA_COLUMNS, BINARY_POSITIVE_GROUPS
+
+    df = pd.read_csv(all_path)
+    # Drop the 'split' tag column if present
+    if "split" in df.columns:
+        df = df.drop(columns=["split"])
+
+    meta = METADATA_COLUMNS.union({"event_count", "event_ids", "source_folders"})
+    feature_cols = [
+        c for c in df.select_dtypes(include="number").columns if c not in meta
+    ]
+    if not feature_cols:
+        raise ValueError(f"No numeric feature columns found in {all_path}")
+
+    if task == "binary":
+        y = df["group"].isin(BINARY_POSITIVE_GROUPS).astype(int)
+    elif task == "multiclass":
+        y = df["class_id"].astype(int)
+    else:
+        raise ValueError(f"Unknown task: {task}")
+
+    X = df[feature_cols]
+    groups = df["subject_id"].astype(str).values
+    return X, y, groups, feature_cols
 
 
 def _take_rows(data, indices):
@@ -169,24 +206,41 @@ def run():
         if test_path is None:
             test_path = DEFAULT_TEST_PATH
 
-        X_train, X_test, y_train, y_test, groups_train, groups_test, feature_cols = load_train_test_datasets(
-            Path(train_path), Path(test_path), task
-        )
+        # -------------------------------------------------------------- #
+        # For per-fold confusion-matrix GRAPHING we want ALL events and
+        # patients, not just the 80 % training partition.  Prefer the
+        # combined all-events CSV produced by extract_npy_features.py;
+        # fall back to train-only if it doesn't exist yet.
+        # -------------------------------------------------------------- #
+        all_path_candidate = Path(train_path).parent / "npy_features_all.csv"
+        if not all_path_candidate.exists():
+            all_path_candidate = DEFAULT_ALL_PATH
+
+        if all_path_candidate.exists():
+            print(f"  [full cohort] Loading all events from {all_path_candidate.name}")
+            X_all, y_all, groups_all, feature_cols = load_all_dataset(all_path_candidate, task)
+        else:
+            print("  [warn] npy_features_all.csv not found — falling back to train split only.")
+            print("  Run extract_npy_features.py first to generate the full-cohort CSV.")
+            X_train, X_test, y_train, y_test, groups_train, groups_test, feature_cols = load_train_test_datasets(
+                Path(train_path), Path(test_path), task
+            )
+            X_all, y_all, groups_all = X_train, y_train, groups_train
 
         # determine cv folds used
         fast = FAST_SEARCH_SETTINGS.get(artifact.get("model_name") or artifact.get("model_name"), {}) if FAST_SEARCH_SETTINGS else {}
         cv_folds = int(fast.get("cv_folds", 5))
         cv = StratifiedGroupKFold(n_splits=cv_folds, shuffle=True, random_state=42)
 
-        # compute per-fold confusion matrices at event-level
-        cms_event = compute_per_fold_confusion(artifact["model"], X_train, y_train, groups_train, cv, task)
+        # compute per-fold confusion matrices at event-level (full cohort)
+        cms_event = compute_per_fold_confusion(artifact["model"], X_all, y_all, groups_all, cv, task)
 
-        # compute per-fold grouped confusion using subject-level aggregation before CV
+        # compute per-fold grouped confusion using subject-level aggregation (full cohort)
         cms_grouped = compute_grouped_per_fold_confusion(
             artifact["model"],
-            X_train,
-            y_train,
-            groups_train,
+            X_all,
+            y_all,
+            groups_all,
             feature_cols,
             cv,
             task,
