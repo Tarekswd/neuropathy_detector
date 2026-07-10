@@ -7,15 +7,17 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import joblib
 
-from models.training_utils import (
+from training_utils import (
     DEFAULT_TEST_PATH,
     DEFAULT_TRAIN_PATH,
     configure_warnings,
     evaluate_pipeline,
-    load_train_test_datasets,
+    evaluate_patient_level_from_events,
+    load_full_dataset,
 )
 
 VALID_MODELS = {"lr", "svm", "rf", "xgb", "catboost"}
@@ -33,12 +35,11 @@ def main() -> None:
         task = payload["task"]
         pipeline = payload["model"]
 
-        X_train, X_test, y_train, y_test, _, _, _ = load_train_test_datasets(
-            DEFAULT_TRAIN_PATH, DEFAULT_TEST_PATH, task
+        X_full, y_full, groups_full, _ = load_full_dataset((DEFAULT_TRAIN_PATH, DEFAULT_TEST_PATH), task)
+        event_metrics = evaluate_pipeline(pipeline, X_full, y_full, task)
+        patient_metrics, patient_predictions = evaluate_patient_level_from_events(
+            pipeline, X_full, y_full, groups_full, task
         )
-
-        train_metrics = evaluate_pipeline(pipeline, X_train, y_train, task)
-        test_metrics = evaluate_pipeline(pipeline, X_test, y_test, task)
 
         metrics_path = tuned_dir / f"{model_name}_{task}_metrics.json"
         existing = {}
@@ -49,8 +50,9 @@ def main() -> None:
             **existing,
             "model": model_name,
             "task": task,
-            "train_metrics": train_metrics,
-            "test_metrics": test_metrics,
+            "event_metrics": event_metrics,
+            "patient_metrics": patient_metrics,
+            "patient_level_predictions": patient_predictions,
         }
         metrics_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
         print(f"Updated {metrics_path.name}")

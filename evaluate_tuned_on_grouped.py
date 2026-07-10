@@ -1,217 +1,171 @@
 """
-Evaluate tuned (ungrouped) models on grouped patient-level test data.
-This creates the "grouped_sudden" model type: tuned models tested on grouped data.
+Evaluate tuned (ungrouped) models on grouped patient-level data.
+The tuned pipeline already contains its own fitted scaler, so grouped data
+is passed directly to pipeline.predict() using the feature columns stored
+in each artifact.
 """
+from __future__ import annotations
 
-import os
 import json
+import sys
+from pathlib import Path
+
 import joblib
 import numpy as np
-import pandas as pd
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
-    balanced_accuracy_score, accuracy_score, roc_auc_score,
-    precision_score, recall_score, f1_score, confusion_matrix
+    accuracy_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
 )
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-def compute_metrics(y_true, y_pred, y_pred_proba, task):
-    """Compute 8 evaluation metrics."""
-    metrics = {}
-    
-    try:
-        metrics['balanced_accuracy'] = balanced_accuracy_score(y_true, y_pred)
-    except:
-        metrics['balanced_accuracy'] = None
-    
-    try:
-        metrics['accuracy'] = accuracy_score(y_true, y_pred)
-    except:
-        metrics['accuracy'] = None
-    
-    try:
-        if task == "binary" and y_pred_proba is not None:
-            metrics['auc'] = roc_auc_score(y_true, y_pred_proba[:, 1])
-        else:
-            metrics['auc'] = None
-    except:
-        metrics['auc'] = None
-    
-    try:
-        metrics['precision'] = precision_score(y_true, y_pred, average='weighted', zero_division=0)
-    except:
-        metrics['precision'] = None
-    
-    try:
-        metrics['recall'] = recall_score(y_true, y_pred, average='weighted', zero_division=0)
-    except:
-        metrics['recall'] = None
-    
-    try:
-        metrics['f1_score'] = f1_score(y_true, y_pred, average='weighted', zero_division=0)
-    except:
-        metrics['f1_score'] = None
-    
-    # Sensitivity and Specificity (for binary only)
+from training_utils import load_full_dataset
+
+TUNED_DIR = PROJECT_ROOT / "models" / "tuned"
+GROUPED_TRAIN = PROJECT_ROOT / "grouped_patient_footprints" / "grouped_patient_features_train.csv"
+GROUPED_TEST = PROJECT_ROOT / "grouped_patient_footprints" / "grouped_patient_features_test.csv"
+OUTPUT_DIR = PROJECT_ROOT / "models" / "grouped_models_sudden"
+
+VALID_MODELS = {"lr", "svm", "rf", "xgb", "catboost"}
+
+
+def _compute_metrics(y_true, y_pred, y_proba, task: str) -> dict:
+    avg = "binary" if task == "binary" else "weighted"
+    metrics: dict = {
+        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "precision": float(precision_score(y_true, y_pred, average=avg, zero_division=0)),
+        "recall": float(recall_score(y_true, y_pred, average=avg, zero_division=0)),
+        "f1_score": float(f1_score(y_true, y_pred, average=avg, zero_division=0)),
+        "auc": None,
+        "sensitivity": None,
+        "specificity": None,
+    }
+
     if task == "binary":
         try:
-            tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-            metrics['sensitivity'] = tp / (tp + fn) if (tp + fn) > 0 else 0
-            metrics['specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0
-        except:
-            metrics['sensitivity'] = None
-            metrics['specificity'] = None
-    else:
-        metrics['sensitivity'] = None
-        metrics['specificity'] = None
-    
+            cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+            tn, fp, fn, tp = cm.ravel()
+            metrics["sensitivity"] = float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+            metrics["specificity"] = float(tn / (tn + fp)) if (tn + fp) > 0 else 0.0
+        except Exception:
+            pass
+        if y_proba is not None:
+            try:
+                metrics["auc"] = float(roc_auc_score(y_true, y_proba[:, 1]))
+            except Exception:
+                pass
+
     return metrics
 
 
-def main():
-    print("Loading grouped patient-level data...")
-    
-    train_df = pd.read_csv('grouped_patient_footprints/grouped_patient_features_train.csv')
-    test_df = pd.read_csv('grouped_patient_footprints/grouped_patient_features_test.csv')
-    
-    exclude_cols = {"group", "class_id", "subject_id", "event_count", "event_ids", "source_folders"}
-    feature_columns = [col for col in train_df.columns if col not in exclude_cols]
-    
-    grouped_train_data = train_df[feature_columns].to_numpy(dtype=float)
-    grouped_test_data = test_df[feature_columns].to_numpy(dtype=float)
-    
-    grouped_train_labels_binary = (train_df["class_id"].to_numpy() >= 2).astype(int)
-    grouped_train_labels_multiclass = train_df["class_id"].to_numpy()
-    grouped_test_labels_binary = (test_df["class_id"].to_numpy() >= 2).astype(int)
-    grouped_test_labels_multiclass = test_df["class_id"].to_numpy()
-    
-    print(f"  Grouped train data shape: {grouped_train_data.shape}")
-    print(f"  Grouped test data shape: {grouped_test_data.shape}")
-    
-    # Select top 20 features by variance
-    all_features = np.vstack([grouped_train_data, grouped_test_data])
-    feature_variance = np.var(all_features, axis=0)
-    top_k_indices = np.argsort(feature_variance)[-20:]
-    top_k_indices = np.sort(top_k_indices)
-    
-    grouped_train_data_selected = grouped_train_data[:, top_k_indices]
-    grouped_test_data_selected = grouped_test_data[:, top_k_indices]
-    
-    print(f"  Selected top 20 features")
-    print(f"  Grouped train data (selected): {grouped_train_data_selected.shape}")
-    print(f"  Grouped test data (selected): {grouped_test_data_selected.shape}")
-    
-    # Apply StandardScaler normalization
-    scaler = StandardScaler()
-    grouped_train_data_scaled = scaler.fit_transform(grouped_train_data_selected)
-    grouped_test_data_scaled = scaler.transform(grouped_test_data_selected)
-    
-    # Create output directory
-    output_dir = 'models/grouped_models_sudden'
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Model configurations
-    models_config = [
-        ('svm', 'binary'),
-        ('svm', 'multiclass'),
-        ('rf', 'binary'),
-        ('rf', 'multiclass'),
-        ('lr', 'binary'),
-        ('lr', 'multiclass'),
-        ('xgb', 'binary'),
-        ('xgb', 'multiclass'),
-        ('catboost', 'binary'),
-        ('catboost', 'multiclass'),
-    ]
-    
-    leaderboard = []
-    all_results = []
-    
-    for algorithm, task in models_config:
-        print(f"\n{'='*80}")
-        print(f"Processing: {algorithm.upper()} - {task.upper()}")
-        print(f"{'='*80}")
-        
-        # Load tuned model
-        model_path = f'models/tuned/{algorithm}_{task}_tuned_model.joblib'
-        print(f"Loading tuned model from: {model_path}")
-        
-        try:
-            model = joblib.load(model_path)
-        except Exception as e:
-            print(f"ERROR: Failed to load model: {e}")
-            continue
-        
-        # Select appropriate labels
-        if task == "binary":
-            grouped_test_labels = grouped_test_labels_binary
+def main() -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    grouped_dfs: dict[str, tuple] = {}
+    for task in ("binary", "multiclass"):
+        X, y, groups, feature_cols = load_full_dataset([GROUPED_TRAIN, GROUPED_TEST], task=task)
+        grouped_dfs[task] = (X, y, groups, feature_cols)
+
+    leaderboard: list[dict] = []
+    all_results: list[dict] = []
+
+    for artifact_path in sorted(TUNED_DIR.glob("*_tuned.joblib")):
+        stem = artifact_path.stem
+        for task in ("binary", "multiclass"):
+            suffix = f"_{task}_tuned"
+            if stem.endswith(suffix):
+                algo = stem[: -len(suffix)]
+                break
         else:
-            grouped_test_labels = grouped_test_labels_multiclass
-        
-        # Predict on grouped test data
-        print(f"Predicting on grouped test data...")
-        y_pred = model.predict(grouped_test_data_scaled)
-        
+            print(f"Skipping unrecognised artifact: {artifact_path.name}")
+            continue
+
+        if algo not in VALID_MODELS:
+            print(f"Skipping unknown model: {algo}")
+            continue
+
+        print(f"\n{'='*70}")
+        print(f"  {algo.upper()} — {task.upper()}")
+        print(f"{'='*70}")
+
+        artifact = joblib.load(artifact_path)
+        pipeline = artifact["model"]
+        trained_features: list[str] = artifact.get("features") or artifact.get("feature_columns") or []
+
+        X_grouped, y_grouped, _, _ = grouped_dfs[task]
+
+        if trained_features:
+            available = [f for f in trained_features if f in X_grouped.columns]
+            if not available:
+                print("  No matching features found — skipping.")
+                continue
+            X_eval = X_grouped[available]
+        else:
+            X_eval = X_grouped
+
+        y_true = np.asarray(y_grouped)
+        y_pred = pipeline.predict(X_eval)
+
+        y_proba = None
         try:
-            y_pred_proba = model.predict_proba(grouped_test_data_scaled)
-        except:
-            y_pred_proba = None
-        
-        # Compute metrics
-        test_metrics = compute_metrics(grouped_test_labels, y_pred, y_pred_proba, task)
-        
-        # Compute confusion matrix
-        cm = confusion_matrix(grouped_test_labels, y_pred)
-        cm_labels = sorted(np.unique(grouped_test_labels))
-        
-        # Create metrics data structure
-        metrics_data = {
-            'model': algorithm,
-            'task': task,
-            'model_type': 'grouped_sudden',
-            'description': 'Tuned (ungrouped) models tested on grouped patient-level data',
-            'best_params': 'tuned_from_ungrouped_data',
-            'test_metrics': test_metrics,
-            'confusion_matrix': {
-                'labels': cm_labels,
-                'matrix': cm.tolist()
-            }
+            y_proba = pipeline.predict_proba(X_eval)
+        except Exception:
+            pass
+
+        test_metrics = _compute_metrics(y_true, y_pred, y_proba, task)
+        cm = confusion_matrix(y_true, y_pred)
+        cm_labels = sorted(np.unique(y_true).tolist())
+
+        print(f"  Balanced accuracy : {test_metrics['balanced_accuracy']:.4f}")
+        print(f"  Accuracy          : {test_metrics['accuracy']:.4f}")
+        if test_metrics["auc"] is not None:
+            print(f"  AUC               : {test_metrics['auc']:.4f}")
+        print(f"  Sensitivity       : {test_metrics['sensitivity']}")
+        print(f"  Specificity       : {test_metrics['specificity']}")
+        print(f"  F1                : {test_metrics['f1_score']:.4f}")
+        print(f"  Confusion matrix:\n{cm}")
+
+        result = {
+            "model": algo,
+            "task": task,
+            "model_type": "ungrouped_tuned_tested_on_grouped",
+            "description": "Tuned (ungrouped event-level) model evaluated on grouped patient-level data",
+            "artifact": str(artifact_path),
+            "features_used": list(X_eval.columns),
+            "test_metrics": test_metrics,
+            "confusion_matrix": {"labels": cm_labels, "matrix": cm.tolist()},
         }
-        
-        # Save metrics
-        metrics_path = f'{output_dir}/{algorithm}_{task}_grouped_metrics.json'
-        with open(metrics_path, 'w') as f:
-            json.dump(metrics_data, f, indent=2)
-        all_results.append(metrics_data)
-        print(f"  ✓ Saved metrics JSON: {metrics_path}")
-        
-        # Add to leaderboard
+
+        metrics_path = OUTPUT_DIR / f"{algo}_{task}_grouped_metrics.json"
+        metrics_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        print(f"  Saved -> {metrics_path.name}")
+
+        all_results.append(result)
         leaderboard.append({
-            'model': algorithm,
-            'task': task,
-            'balanced_accuracy': test_metrics.get('balanced_accuracy'),
-            'accuracy': test_metrics.get('accuracy'),
-            'f1_score': test_metrics.get('f1_score'),
-            'auc': test_metrics.get('auc')
+            "model": algo,
+            "task": task,
+            "balanced_accuracy": test_metrics["balanced_accuracy"],
+            "accuracy": test_metrics["accuracy"],
+            "f1_score": test_metrics["f1_score"],
+            "auc": test_metrics["auc"],
         })
-    
-    # Save leaderboard
-    leaderboard_path = f'{output_dir}/leaderboard.json'
-    with open(leaderboard_path, 'w') as f:
-        json.dump(leaderboard, f, indent=2)
 
-    # Save consolidated JSON summary
-    summary_path = f'{output_dir}/all_grouped_results.json'
-    with open(summary_path, 'w') as f:
-        json.dump(all_results, f, indent=2)
+    leaderboard.sort(key=lambda r: (r["task"], r["balanced_accuracy"]), reverse=True)
+    (OUTPUT_DIR / "leaderboard.json").write_text(json.dumps(leaderboard, indent=2), encoding="utf-8")
+    (OUTPUT_DIR / "all_grouped_results.json").write_text(json.dumps(all_results, indent=2), encoding="utf-8")
 
-    print(f"\n✓ Saved leaderboard: {leaderboard_path}")
-    print(f"✓ Saved consolidated results: {summary_path}")
-    
-    print(f"\n{'='*80}")
-    print("✓ Completed evaluation of tuned models on grouped test data")
-    print(f"{'='*80}")
+    print(f"\nSaved leaderboard -> {OUTPUT_DIR / 'leaderboard.json'}")
+    print(f"Saved all results -> {OUTPUT_DIR / 'all_grouped_results.json'}")
+    print(f"\nDone. Evaluated {len(all_results)} model/task combinations.")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
