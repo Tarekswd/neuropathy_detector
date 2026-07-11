@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent          # neuropathy_detector/
+ROOT = Path(__file__).resolve().parent          # for_github/
 PROJECT_ROOT = ROOT.parent                      # project root
 
 

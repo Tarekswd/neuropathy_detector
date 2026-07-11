@@ -18,7 +18,6 @@ from sklearn.model_selection import StratifiedGroupKFold
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from models.model_builders import MULTICLASS_LABELS, build_model
 from training_utils import build_pipeline, load_full_dataset
@@ -26,7 +25,7 @@ from training_utils import build_pipeline, load_full_dataset
 DEFAULT_MODELS_DIR = PROJECT_ROOT / "models" / "grouped_tuned"
 DEFAULT_TRAIN_PATH = PROJECT_ROOT / "grouped_patient_footprints" / "grouped_patient_features_train.csv"
 DEFAULT_TEST_PATH = PROJECT_ROOT / "grouped_patient_footprints" / "grouped_patient_features_test.csv"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "models" / "grouped_tuned" / "fold_confusion_matrices"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "models" / "per_fold_confusion_matrices" / "grouped"
 
 METADATA_COLUMNS = {"group", "class_id", "subject_id", "event_id", "source_folder", "event_count"}
 BINARY_POSITIVE_GROUPS = {"NL", "NS"}
@@ -53,6 +52,7 @@ def _labels(task: str) -> list[int]:
 
 
 def _build_fresh_pipeline(model_name: str, best_params: dict, task: str, n_features: int):
+    """Rebuild a pipeline from scratch and apply best_params."""
     pipeline = build_pipeline(build_model(model_name, task, 42), None, n_features)
     if best_params:
         try:
@@ -155,6 +155,7 @@ def main() -> None:
             model_name, best_params, X_full, y_full, groups_full, cv, task
         )
 
+        # Compute summed matrix (should equal full dataset size)
         labels = _labels(task)
         summed_cm = np.zeros((len(labels), len(labels)), dtype=int)
         for fold in fold_results:
@@ -177,6 +178,7 @@ def main() -> None:
         with output_path.open("w", encoding="utf-8") as fh:
             json.dump(output_data, fh, indent=2)
 
+        # Save per-fold PNGs
         png_dir = args.output_dir / "png"
         str_labels = [str(lb) for lb in labels]
         for fold in fold_results:
@@ -185,6 +187,7 @@ def main() -> None:
             _plot_confusion_matrix(cm, str_labels, png_path,
                                    title=f"{artifact_name} fold {fold['fold']} (n_val={fold['n_val']})")
 
+        # Save summed PNG
         summed_png = png_dir / f"{artifact_name}_summed_confusion.png"
         _plot_confusion_matrix(summed_cm, str_labels, summed_png,
                                title=f"{artifact_name} Summed {args.cv_folds} Folds (n={n_total})")

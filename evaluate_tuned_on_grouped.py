@@ -12,6 +12,7 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -33,6 +34,7 @@ GROUPED_TRAIN = PROJECT_ROOT / "grouped_patient_footprints" / "grouped_patient_f
 GROUPED_TEST = PROJECT_ROOT / "grouped_patient_footprints" / "grouped_patient_features_test.csv"
 OUTPUT_DIR = PROJECT_ROOT / "models" / "grouped_models_sudden"
 
+BINARY_POSITIVE_GROUPS = {"NL", "NS"}
 VALID_MODELS = {"lr", "svm", "rf", "xgb", "catboost"}
 
 
@@ -69,6 +71,7 @@ def _compute_metrics(y_true, y_pred, y_proba, task: str) -> dict:
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Load grouped data for both tasks at once
     grouped_dfs: dict[str, tuple] = {}
     for task in ("binary", "multiclass"):
         X, y, groups, feature_cols = load_full_dataset([GROUPED_TRAIN, GROUPED_TEST], task=task)
@@ -78,7 +81,8 @@ def main() -> None:
     all_results: list[dict] = []
 
     for artifact_path in sorted(TUNED_DIR.glob("*_tuned.joblib")):
-        stem = artifact_path.stem
+        # derive model name and task from filename: {algo}_{task}_tuned.joblib
+        stem = artifact_path.stem  # e.g. lr_binary_tuned
         for task in ("binary", "multiclass"):
             suffix = f"_{task}_tuned"
             if stem.endswith(suffix):
@@ -98,14 +102,17 @@ def main() -> None:
 
         artifact = joblib.load(artifact_path)
         pipeline = artifact["model"]
+
+        # Use the feature columns the model was trained on
         trained_features: list[str] = artifact.get("features") or artifact.get("feature_columns") or []
 
-        X_grouped, y_grouped, _, _ = grouped_dfs[task]
+        X_grouped, y_grouped, _, all_grouped_cols = grouped_dfs[task]
 
+        # Align features: keep only columns present in grouped data, in training order
         if trained_features:
             available = [f for f in trained_features if f in X_grouped.columns]
             if not available:
-                print("  No matching features found — skipping.")
+                print(f"  No matching features found — skipping.")
                 continue
             X_eval = X_grouped[available]
         else:

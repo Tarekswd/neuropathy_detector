@@ -9,11 +9,10 @@ import joblib
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from models.model_builders import build_model
-from tune_models import FAST_SEARCH_SETTINGS, PARAM_DISTRIBUTIONS, _requested_tasks, tune_model
-from training_utils import (
+from models.tune_models import FAST_SEARCH_SETTINGS, PARAM_DISTRIBUTIONS, _effective_k_features, _requested_tasks, tune_model
+from models.training_utils import (
     build_pipeline,
     evaluate_pipeline,
     evaluate_patient_level_from_events,
@@ -38,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", choices=["all", "binary", "multiclass"], default="all")
     parser.add_argument("--model", choices=["all", "lr", "svm", "rf", "xgb", "catboost"], default="all")
     parser.add_argument("--random-state", type=int, default=42)
-    parser.add_argument("--k-features", type=int, default=20)
+    parser.add_argument("--k-features", type=int, default=20, help="Number of top features to use (default: 20).")
     parser.add_argument("--cv-folds", type=int, default=5)
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "models" / "grouped_tuned")
     parser.add_argument("--best-model-dir", type=Path, default=PROJECT_ROOT / "best model" / "grouped")
@@ -63,12 +62,9 @@ def main() -> None:
     leaderboard: list[dict] = []
     for task in tasks_to_run:
         print(f"\n=== Grouped tuning task: {task} ===")
-        # Use 100% of data: train + test combined
-        X_full, y_full, groups_full, feature_cols = load_full_dataset(
-            [args.train_data, args.test_data], task=task
-        )
+        X_full, y_full, groups_full, feature_cols = load_full_dataset([args.train_data, args.test_data], task=task)
         X_full = filter_event_count(X_full)
-        feature_cols = [c for c in feature_cols if c != "event_count"]
+        feature_cols = [c for c in feature_cols if c != "event_count"] if "event_count" in feature_cols else feature_cols
 
         for name in model_names:
             print("\n" + "=" * 80)
@@ -79,7 +75,6 @@ def main() -> None:
 
             fast = FAST_SEARCH_SETTINGS.get(name, {})
             cv_folds = int(fast.get("cv_folds", args.cv_folds) or args.cv_folds)
-            from training_utils import _effective_k_features
             k_features = _effective_k_features(args.k_features, X_full.shape[1])
             pipeline_factory = lambda: build_pipeline(
                 build_model(name, task, args.random_state),
@@ -103,14 +98,25 @@ def main() -> None:
                 event_metrics = evaluate_pipeline(best_pipeline, X_full, y_full, task)
             if patient_metrics is None:
                 patient_metrics, patient_predictions = evaluate_patient_level_from_events(
-                    best_pipeline, X_full, y_full, groups_full, task
+                    best_pipeline,
+                    X_full,
+                    y_full,
+                    groups_full,
+                    task,
                 )
 
             feature_stats = summarize_feature_statistics(X_full, feature_cols)
+            sens_mean = cv_summary.get("sensitivity_mean")
+            sens_std = cv_summary.get("sensitivity_std")
+            sens_str = f"{sens_mean:.4f} ± {sens_std:.4f}" if sens_mean is not None else "N/A"
+
             print(f"\nBest CV balanced accuracy: {cv_score:.4f}")
+            print(f"CV Sensitivity: {sens_str}")
             print(f"Best params: {json.dumps(best_params, indent=2)}")
             print_feature_statistics(feature_stats, label=f"{name.upper()} grouped features")
+            print("\nCross-validated event metrics:")
             print_metrics(name.upper(), task, event_metrics, label="CV Event Metrics")
+            print("\nCross-validated patient metrics:")
             print_metrics(name.upper(), task, patient_metrics, label="CV Patient Metrics")
 
             artifact = {
@@ -136,22 +142,30 @@ def main() -> None:
             metrics_path = args.output_dir / f"{name}_{task}_grouped_metrics.json"
             metrics_path.write_text(json.dumps(artifact, default=str, indent=2), encoding="utf-8")
 
-            leaderboard.append({
-                "model": name,
-                "task": task,
-                "output_path": str(output_path),
-                "cv_balanced_accuracy": cv_score,
-                "patient_balanced_accuracy": patient_metrics.get("balanced_accuracy"),
-                "patient_f1_score": patient_metrics.get("f1_score"),
-                "patient_auc": patient_metrics.get("auc"),
-            })
+            leaderboard.append(
+                {
+                    "model": name,
+                    "task": task,
+                    "output_path": str(output_path),
+                    "cv_balanced_accuracy": cv_score,
+                    "cv_sensitivity_mean": sens_mean,
+                    "cv_sensitivity_std": sens_std,
+                    "cv_sensitivity_mean_plus_std": (sens_mean + sens_std) if sens_mean is not None else None,
+                    "cv_sensitivity_mean_minus_std": (sens_mean - sens_std) if sens_mean is not None else None,
+                    "patient_balanced_accuracy": patient_metrics.get("balanced_accuracy"),
+                    "patient_f1_score": patient_metrics.get("f1_score"),
+                    "patient_auc": patient_metrics.get("auc"),
+                }
+            )
 
-    leaderboard.sort(key=lambda row: (row["task"], row["cv_balanced_accuracy"]), reverse=True)
+    leaderboard.sort(key=lambda row: (row["task"], row["cv_balanced_accuracy"], row["patient_balanced_accuracy"]), reverse=True)
     print("\n=== Grouped tuning leaderboard ===")
     for rank, row in enumerate(leaderboard, start=1):
         auc_str = f"{row['patient_auc']:.4f}" if row["patient_auc"] is not None else "N/A"
+        sens_str = f"{row['cv_sensitivity_mean']:.4f} ± {row['cv_sensitivity_std']:.4f}" if row["cv_sensitivity_mean"] is not None else "N/A"
         print(
             f"{rank}. {row['model']} ({row['task']}): cv_bal_acc={row['cv_balanced_accuracy']:.4f}, "
+            f"cv_sensitivity={sens_str}, "
             f"patient_bal_acc={row['patient_balanced_accuracy']:.4f}, f1={row['patient_f1_score']:.4f}, auc={auc_str}"
         )
 
@@ -173,6 +187,10 @@ def main() -> None:
             "output_path": best["output_path"],
             "saved_path": str(best_path),
             "cv_balanced_accuracy": best["cv_balanced_accuracy"],
+            "cv_sensitivity_mean": best["cv_sensitivity_mean"],
+            "cv_sensitivity_std": best["cv_sensitivity_std"],
+            "cv_sensitivity_mean_plus_std": best["cv_sensitivity_mean_plus_std"],
+            "cv_sensitivity_mean_minus_std": best["cv_sensitivity_mean_minus_std"],
             "patient_balanced_accuracy": best["patient_balanced_accuracy"],
             "patient_f1_score": best["patient_f1_score"],
             "patient_auc": best["patient_auc"],
@@ -185,13 +203,13 @@ def main() -> None:
 
     try:
         from run_shap_analysis import run_analysis
+
         for task_name, info in best_paths.items():
             model_path = Path(info["saved_path"])
             shap_out = args.output_dir.parent / "shap_outputs" / f"grouped_{task_name}"
             print(f"Running SHAP for grouped best {task_name} model -> {model_path}")
             try:
-                run_analysis(model_path, args.train_data, args.test_data, task_name, shap_out,
-                             args.cv_folds, out_png_name=f"shap_grouped_{task_name}.png")
+                run_analysis(model_path, args.train_data, args.test_data, task_name, shap_out, args.cv_folds, out_png_name=f"shap_grouped_{task_name}.png")
             except Exception as exc:
                 print(f"Failed to run SHAP for {task_name}: {exc}")
     except Exception as exc:

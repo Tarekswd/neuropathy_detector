@@ -64,16 +64,25 @@ def _load_metrics(model_dir: Path, algo: str, task: str) -> dict | None:
 
 
 def _extract_mean_std(data: dict, metric: str) -> str:
+    """
+    Extract mean ± std from cv_metrics_summary.
+
+    Ungrouped tuned  → cv_metrics_summary[metric] = {"mean": x, "std": y}
+    Grouped tuned    → cv_metrics_summary has flat keys: metric_mean / metric_std
+                       OR nested fold_metrics list from subject_cross_validation
+    """
     cv = data.get("cv_metrics_summary", {})
     if not cv:
         return "N/A"
 
+    # --- nested dict format: {"mean": x, "std": y} ---
     if metric in cv and isinstance(cv[metric], dict):
         mean = cv[metric].get("mean")
         std = cv[metric].get("std", 0.0) or 0.0
         if mean is not None:
             return f"{mean:.3f} ± {std:.3f}"
 
+    # --- flat key format: metric_mean / metric_std ---
     mean_key = f"{metric}_mean"
     std_key = f"{metric}_std"
     if mean_key in cv:
@@ -82,12 +91,14 @@ def _extract_mean_std(data: dict, metric: str) -> str:
         if mean is not None:
             return f"{mean:.3f} ± {std:.3f}"
 
+    # --- sensitivity / recall alias ---
     if metric == "sensitivity":
         alt = _extract_mean_std(data, "recall")
         return alt if alt != "N/A" else "N/A"
     if metric == "recall":
         return _extract_mean_std(data, "sensitivity")
 
+    # --- fallback: compute from fold_metrics list ---
     fold_metrics = cv.get("fold_metrics", [])
     if fold_metrics:
         import numpy as np
@@ -107,7 +118,8 @@ def build_table(model_dir: Path, task: str) -> pd.DataFrame:
         data = _load_metrics(model_dir, algo, task)
         row = {"Algorithm": algo.upper()}
         for metric in METRICS:
-            row[METRIC_LABELS[metric]] = _extract_mean_std(data, metric) if data else "N/A"
+            label = METRIC_LABELS[metric]
+            row[label] = _extract_mean_std(data, metric) if data else "N/A"
         rows.append(row)
     return pd.DataFrame(rows)
 

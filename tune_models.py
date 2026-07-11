@@ -19,7 +19,6 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 import numpy as np
-import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -31,6 +30,8 @@ from models.training_utils import (
     build_pipeline,
     configure_warnings,
     evaluate_pipeline,
+    evaluate_patient_level_from_events,
+    load_full_dataset,
     load_split_manifest,
     load_train_test_datasets,
     print_feature_statistics,
@@ -87,7 +88,7 @@ FAST_SEARCH_SETTINGS = {
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Hyperparameter tuning with fixed 80/20 subject split.")
+    parser = argparse.ArgumentParser(description="Hyperparameter tuning with subject-aware cross-validation on all available data.")
     parser.add_argument("--train-data", type=Path, default=DEFAULT_TRAIN_PATH)
     parser.add_argument("--test-data", type=Path, default=DEFAULT_TEST_PATH)
     parser.add_argument("--task", choices=["all", "binary", "multiclass"], default="all")
@@ -168,6 +169,25 @@ def _take_rows(data, indices):
     return data[indices]
 
 
+def _aggregate_to_patient_level(X, y, groups):
+    """Collapse event rows → one row per subject (mean features, majority label)."""
+    import pandas as pd
+    df = X.copy() if isinstance(X, pd.DataFrame) else pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
+    df["__subject__"] = np.asarray(groups)
+    df["__label__"] = np.asarray(y.values if hasattr(y, "values") else y)
+    grp = df.groupby("__subject__")
+    feat_cols = [c for c in df.columns if c not in ("__subject__", "__label__")]
+    X_pat = grp[feat_cols].mean()
+
+    def _mode(s):
+        m = s.mode()
+        return int(m.iloc[0]) if not m.empty else int(s.iloc[0])
+
+    y_pat = grp["__label__"].agg(_mode).astype(int)
+    groups_pat = X_pat.index.to_numpy(dtype=str)
+    return X_pat, y_pat, groups_pat
+
+
 def _compute_cv_metrics(estimator, X, y, groups, cv):
     """Run manual CV to collect per-fold metrics (returns dict of lists)."""
     metrics = {
@@ -196,7 +216,7 @@ def _compute_cv_metrics(estimator, X, y, groups, cv):
         y_prob = None
         try:
             y_prob = est.predict_proba(X_val)
-        except Exception:
+        except (AttributeError, ValueError, TypeError):
             y_prob = None
 
         # AUC (handle binary / multiclass)
@@ -209,7 +229,7 @@ def _compute_cv_metrics(estimator, X, y, groups, cv):
                     auc = roc_auc_score(y_val, y_prob, multi_class="ovr", average="weighted")
             else:
                 auc = None
-        except Exception:
+        except (AttributeError, ValueError, TypeError):
             auc = None
 
         bal_acc = balanced_accuracy_score(y_val, y_pred)
@@ -257,6 +277,55 @@ def _compute_cv_metrics(estimator, X, y, groups, cv):
     return metrics
 
 
+def _summarize_cv_metrics(cv_metrics: dict) -> dict:
+    """Convert raw per-fold lists into {mean, std, per_fold, ...} summary dict."""
+    summary = {}
+    for key, values in cv_metrics.items():
+        if key == "confusion_matrix":
+            mats = [np.array(m) for m in values]
+            max_dim = max(m.shape[0] for m in mats)
+            stacked = np.zeros((len(mats), max_dim, max_dim), dtype=float)
+            for i, m in enumerate(mats):
+                stacked[i, : m.shape[0], : m.shape[1]] = m
+            summary[key] = {
+                "per_fold": [m.tolist() for m in mats],
+                "mean_matrix": stacked.mean(axis=0).tolist(),
+                "std_matrix": stacked.std(axis=0).tolist(),
+                "sum_matrix": stacked.sum(axis=0).tolist(),
+            }
+        else:
+            numeric = [v for v in values if v is not None]
+            mean = float(np.mean(numeric)) if numeric else None
+            std = float(np.std(numeric, ddof=0)) if numeric else None
+            summary[key] = {
+                "mean": mean,
+                "std": std,
+                "mean_plus_std": mean + std if mean is not None and std is not None else None,
+                "mean_minus_std": mean - std if mean is not None and std is not None else None,
+                "per_fold": values,
+            }
+    return summary
+
+
+def _print_cv_summary(cv_summary: dict) -> None:
+    for metric in ["auc", "balanced_accuracy", "accuracy", "sensitivity", "specificity", "precision", "f1_score"]:
+        m = cv_summary.get(metric, {})
+        mean = m.get("mean") if m else None
+        std = m.get("std", 0.0) if m else None
+        if mean is not None:
+            print(f"  {metric}: {mean:.4f} ± {std:.4f}")
+        else:
+            print(f"  {metric}: N/A")
+    cm_info = cv_summary.get("confusion_matrix", {})
+    if cm_info:
+        print("  Confusion matrix (mean):")
+        for row in cm_info.get("mean_matrix", []):
+            print(f"    {[round(v, 1) for v in row]}")
+        print("  Confusion matrix (sum across folds):")
+        for row in cm_info.get("sum_matrix", []):
+            print(f"    {[int(v) for v in row]}")
+
+
 def main():
     configure_warnings()
     args = parse_args()
@@ -268,16 +337,18 @@ def main():
     leaderboard = []
 
     for task in tasks_to_run:
-        X_train, X_test, y_train, y_test, groups_train, groups_test, feature_cols = load_train_test_datasets(
+        _, X_test, _, _, _, _, feature_cols = load_train_test_datasets(
             args.train_data,
             args.test_data,
             task,
         )
+        data_paths = [args.train_data, args.test_data]
+        X_full, y_full, groups_full, full_feature_cols = load_full_dataset(data_paths, task)
         split_info = load_split_manifest()
 
-        print("Preprocessing: z-normalization fit on 80% train split only")
-        print("Tuning: subject-level CV inside train split")
-        print("Final evaluation: fixed 20% holdout test split")
+        print("Preprocessing: z-normalization fit on all available data")
+        print("Tuning: subject-level CV on all available data")
+        print("Final evaluation: patient-level metrics from out-of-fold predictions")
         if split_info:
             print(
                 f"Split: {len(split_info.get('train_subjects', []))} train subjects / "
@@ -290,7 +361,7 @@ def main():
             print("=" * 80)
 
             best_pipeline, best_params, cv_score = tune_model(
-                name, X_train, y_train, groups_train, task, args
+                name, X_full, y_full, groups_full, task, args
             )
 
             # recompute CV folds used (honor FAST_SEARCH_SETTINGS)
@@ -298,94 +369,63 @@ def main():
             cv_folds = int(fast.get("cv_folds", args.cv_folds) or args.cv_folds)
             cv = StratifiedGroupKFold(n_splits=cv_folds, shuffle=True, random_state=args.random_state)
 
-            # compute per-fold CV metrics for the chosen estimator
-            print("\nComputing per-fold CV metrics for best estimator...")
-            cv_metrics = _compute_cv_metrics(best_pipeline, X_train, y_train, groups_train, cv)
+            # ------------------------------------------------------------------ #
+            # Phase 1: event-level CV metrics
+            # ------------------------------------------------------------------ #
+            print("\nComputing per-fold event-level CV metrics...")
+            cv_metrics = _compute_cv_metrics(best_pipeline, X_full, y_full, groups_full, cv)
+            cv_summary = _summarize_cv_metrics(cv_metrics)
 
-            # summarize cv metrics: mean, std, per_fold
-            cv_summary = {}
-            for key, values in cv_metrics.items():
-                if key == "confusion_matrix":
-                    # convert list of matrices to array with padding if needed
-                    mats = [np.array(m) for m in values]
-                    max_dim = max(m.shape[0] for m in mats)
-                    stacked = np.zeros((len(mats), max_dim, max_dim), dtype=float)
-                    for i, m in enumerate(mats):
-                        stacked[i, : m.shape[0], : m.shape[1]] = m
-                    mean_mat = stacked.mean(axis=0).tolist()
-                    std_mat = stacked.std(axis=0).tolist()
-                    sum_mat = stacked.sum(axis=0).tolist()
-                    cv_summary[key] = {
-                        "per_fold": [m.tolist() for m in mats],
-                        "mean_matrix": mean_mat,
-                        "std_matrix": std_mat,
-                        "sum_matrix": sum_mat,
-                    }
-                else:
-                    # numeric metrics; some entries (like AUC) may be None
-                    numeric = [v for v in values if v is not None]
-                    mean = float(np.mean(numeric)) if numeric else None
-                    std = float(np.std(numeric, ddof=0)) if numeric else None
-                    cv_summary[key] = {
-                        "mean": mean,
-                        "std": std,
-                        "mean_plus_std": mean + std if mean is not None and std is not None else None,
-                        "mean_minus_std": mean - std if mean is not None and std is not None else None,
-                        "per_fold": values,
-                    }
+            print("\nEvent-level CV (mean ± std):")
+            _print_cv_summary(cv_summary)
 
-            # print CV summary (show mean+std and mean-std values)
-            print("\nCV metrics (train-split folds):")
-            for metric in ["auc", "balanced_accuracy", "accuracy", "sensitivity", "specificity", "precision", "f1_score"]:
-                m = cv_summary.get(metric, {})
-                if m and m["mean"] is not None:
-                    mean = m["mean"]
-                    std = m.get("std") if m.get("std") is not None else 0.0
-                    plus = mean + std
-                    minus = mean - std
-                    # output the two computed numbers (mean+std, mean-std)
-                    print(f"- {metric}: {plus:.4f}, {minus:.4f}")
-                else:
-                    print(f"- {metric}: N/A")
+            # ------------------------------------------------------------------ #
+            # Phase 2: patient-level CV — retrain on aggregated subject rows
+            # ------------------------------------------------------------------ #
+            print("\nComputing per-fold patient-level CV metrics...")
+            X_pat, y_pat, groups_pat = _aggregate_to_patient_level(X_full, y_full, groups_full)
+            patient_cv_metrics = _compute_cv_metrics(best_pipeline, X_pat, y_pat, groups_pat, cv)
+            patient_cv_summary = _summarize_cv_metrics(patient_cv_metrics)
 
-            train_metrics = evaluate_pipeline(best_pipeline, X_train, y_train, task)
-            test_metrics = evaluate_pipeline(best_pipeline, X_test, y_test, task)
+            print("\nPatient-level CV (mean ± std):")
+            _print_cv_summary(patient_cv_summary)
 
-            # Do not test the models on grouped data, only on the ungrouped data
-            grouped_test_metrics = None
-            grouped_test_feature_stats = []
+            event_metrics = evaluate_pipeline(best_pipeline, X_full, y_full, task)
+            patient_metrics, patient_predictions = evaluate_patient_level_from_events(
+                best_pipeline, X_full, y_full, groups_full, task
+            )
 
-            train_feature_stats = summarize_feature_statistics(X_train, feature_cols)
+            print("\n" + "-" * 60)
+            print("Patient-level evaluation from event-level predictions")
+            print("-" * 60)
+            print_metrics(name.upper(), task, patient_metrics, label="Patient-level (OOF aggregation)")
+
+            train_feature_stats = summarize_feature_statistics(X_full, full_feature_cols)
             test_feature_stats = summarize_feature_statistics(X_test, feature_cols)
-
-            print(f"\nBest train-split CV balanced accuracy: {cv_score:.4f}")
+            print(f"\nBest subject CV balanced accuracy: {cv_score:.4f}")
             print(f"Best params: {json.dumps(best_params, indent=2)}")
-            print_feature_statistics(train_feature_stats, label=f"{name.upper()} train features")
+            print_feature_statistics(train_feature_stats, label=f"{name.upper()} all-data features")
             print_feature_statistics(test_feature_stats, label=f"{name.upper()} test features")
-            print_metrics(name.upper(), task, train_metrics, label="Train (80%)")
-            print_metrics(name.upper(), task, test_metrics, label="Test (20%)")
-            gap = train_metrics["balanced_accuracy"] - test_metrics["balanced_accuracy"]
-            print(f"\nTrain-test balanced accuracy gap: {gap:.4f}")
-
+            print_metrics(name.upper(), task, event_metrics, label="Event-level (full data)")
             output_path = args.output_dir / f"{name}_{task}_tuned.joblib"
             joblib.dump(
                 {
                     "model": best_pipeline,
                     "task": task,
                     "model_name": name,
-                    "features": feature_cols,
+                    "features": full_feature_cols,
                     "best_params": best_params,
-                    "validation": "fixed_80_20_subject_split",
-                    "normalization": "train_fit_zscore",
+                    "validation": "subject_aware_cv_all_data",
+                    "normalization": "all_data_fit_zscore",
                     "cv_balanced_accuracy": cv_score,
                     "cv_metrics_summary": cv_summary,
-                    "train_metrics": train_metrics,
-                    "test_metrics": test_metrics,
-                    "grouped_test_metrics": grouped_test_metrics,
+                    "patient_cv_metrics_summary": patient_cv_summary,
+                    "event_metrics": event_metrics,
+                    "patient_metrics": patient_metrics,
+                    "patient_level_predictions": patient_predictions,
                     "feature_statistics": {
-                        "train": train_feature_stats,
+                        "all_data": train_feature_stats,
                         "test": test_feature_stats,
-                        "grouped_test": grouped_test_feature_stats,
                     },
                 },
                 output_path,
@@ -398,56 +438,58 @@ def main():
                     {
                         "model": name,
                         "task": task,
-                        "validation": "fixed_80_20_subject_split",
-                        "normalization": "train_fit_zscore",
+                        "validation": "subject_aware_cv_all_data",
+                        "normalization": "all_data_fit_zscore",
                         "best_params": best_params,
                         "cv_balanced_accuracy": cv_score,
                         "cv_metrics_summary": cv_summary,
-                        "train_metrics": train_metrics,
-                        "test_metrics": test_metrics,
-                        "grouped_test_metrics": grouped_test_metrics,
+                        "patient_cv_metrics_summary": patient_cv_summary,
+                        "event_metrics": event_metrics,
+                        "patient_metrics": patient_metrics,
+                        "patient_level_predictions": patient_predictions,
                     },
                     indent=2,
                 ),
                 encoding="utf-8",
             )
 
-            # If grouped test metrics were computed, save a grouped-model artifact and metrics
             try:
-                if grouped_test_metrics is not None:
-                    grouped_output_dir = PROJECT_ROOT / "models" / "grouped_models_sudden"
-                    grouped_output_dir.mkdir(parents=True, exist_ok=True)
+                grouped_output_dir = PROJECT_ROOT / "models" / "grouped_models_sudden"
+                grouped_output_dir.mkdir(parents=True, exist_ok=True)
 
-                    grouped_artifact_path = grouped_output_dir / f"{name}_{task}_grouped_model.joblib"
-                    joblib.dump(
+                grouped_artifact_path = grouped_output_dir / f"{name}_{task}_grouped_model.joblib"
+                joblib.dump(
+                    {
+                        "model": best_pipeline,
+                        "task": task,
+                        "model_name": name,
+                        "features": full_feature_cols,
+                        "best_params": best_params,
+                        "note": "Ungrouped model trained with subject-aware CV over all event rows; patient metrics aggregate out-of-fold predictions by patient.",
+                        "patient_metrics": patient_metrics,
+                        "patient_level_predictions": patient_predictions,
+                    },
+                    grouped_artifact_path,
+                )
+
+                grouped_metrics_path = grouped_output_dir / f"{name}_{task}_grouped_metrics.json"
+                grouped_metrics_path.write_text(
+                    json.dumps(
                         {
-                            "model": best_pipeline,
+                            "model": name,
                             "task": task,
-                            "model_name": name,
-                            "features": feature_cols,
-                            "best_params": best_params,
-                            "grouped_test_metrics": grouped_test_metrics,
-                            "grouped_test_feature_statistics": grouped_test_feature_stats,
+                            "note": "Ungrouped model trained with subject-aware CV over all event rows; patient metrics aggregate out-of-fold predictions by patient.",
+                            "patient_metrics": patient_metrics,
+                            "patient_level_predictions": patient_predictions,
                         },
-                        grouped_artifact_path,
-                    )
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
 
-                    grouped_metrics_path = grouped_output_dir / f"{name}_{task}_grouped_metrics.json"
-                    grouped_metrics_path.write_text(
-                        json.dumps(
-                            {
-                                "model": name,
-                                "task": task,
-                                "grouped_test_metrics": grouped_test_metrics,
-                            },
-                            indent=2,
-                        ),
-                        encoding="utf-8",
-                    )
-
-                    print(f"Saved grouped model artifact -> {grouped_artifact_path}")
-                    print(f"Saved grouped metrics -> {grouped_metrics_path}")
-            except Exception:
+                print(f"Saved grouped model artifact -> {grouped_artifact_path}")
+                print(f"Saved grouped metrics -> {grouped_metrics_path}")
+            except (OSError, TypeError, ValueError):
                 print("Warning: failed to save grouped model artifacts.")
 
             leaderboard.append(
@@ -456,27 +498,28 @@ def main():
                     "task": task,
                     "output_path": str(output_path),
                     "cv_balanced_accuracy": cv_score,
-                    "test_balanced_accuracy": test_metrics["balanced_accuracy"],
-                    "test_f1_score": test_metrics["f1_score"],
-                    "test_auc": test_metrics["auc"],
+                    "event_balanced_accuracy": event_metrics["balanced_accuracy"],
+                    "patient_balanced_accuracy": patient_metrics["balanced_accuracy"],
+                    "patient_f1_score": patient_metrics["f1_score"],
+                    "patient_auc": patient_metrics["auc"],
                 }
             )
 
     if not leaderboard:
         raise RuntimeError("No models were trained.")
 
-    leaderboard.sort(key=lambda row: (row["test_balanced_accuracy"], row["cv_balanced_accuracy"]), reverse=True)
+    leaderboard.sort(key=lambda row: (row["patient_balanced_accuracy"], row["cv_balanced_accuracy"]), reverse=True)
     print("\n" + "=" * 80)
-    print("LEADERBOARD (by 20% holdout balanced accuracy)")
+    print("LEADERBOARD (by patient-level CV balanced accuracy)")
     print("=" * 80)
     for rank, row in enumerate(leaderboard, start=1):
-        auc = row["test_auc"]
+        auc = row["patient_auc"]
         auc_str = f"{auc:.4f}" if auc is not None else "N/A"
         print(
             f"{rank}. {row['model']} ({row['task']}): "
             f"cv_bal_acc={row['cv_balanced_accuracy']:.4f}, "
-            f"holdout_bal_acc={row['test_balanced_accuracy']:.4f}, "
-            f"f1={row['test_f1_score']:.4f}, "
+            f"patient_bal_acc={row['patient_balanced_accuracy']:.4f}, "
+            f"f1={row['patient_f1_score']:.4f}, "
             f"auc={auc_str}"
         )
 
@@ -487,10 +530,10 @@ def main():
         if not candidates:
             continue
         # pick the top candidate for this task
-        candidates.sort(key=lambda r: (r["test_balanced_accuracy"], r["cv_balanced_accuracy"]), reverse=True)
+        candidates.sort(key=lambda r: (r["patient_balanced_accuracy"], r["cv_balanced_accuracy"]), reverse=True)
         best = candidates[0]
         artifact = joblib.load(best["output_path"])
-        artifact["selected_by"] = "holdout_balanced_accuracy"
+        artifact["selected_by"] = "patient_cv_balanced_accuracy"
         artifact["selected_task"] = best["task"]
         artifact["selected_model"] = best["model"]
 
@@ -504,9 +547,9 @@ def main():
             "output_path": best["output_path"],
             "saved_path": str(model_path),
             "cv_balanced_accuracy": best["cv_balanced_accuracy"],
-            "test_balanced_accuracy": best["test_balanced_accuracy"],
-            "test_f1_score": best["test_f1_score"],
-            "test_auc": best["test_auc"],
+            "patient_balanced_accuracy": best["patient_balanced_accuracy"],
+            "patient_f1_score": best["patient_f1_score"],
+            "patient_auc": best["patient_auc"],
         }
 
         print(f"Saved best {task_name} model -> {model_path}")

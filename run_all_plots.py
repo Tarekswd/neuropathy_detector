@@ -11,8 +11,7 @@ PYTHON = VENV_PYTHON if VENV_PYTHON.exists() else Path(sys.executable)
 
 SCRIPTS = [
     "plotting_npy_pics.py",
-    "plotting_npy_graph.py",
-    "plot_features_grid.py",
+    "plotting_npi_graph.py",
     "plot_xml_footprints.py",
 ]
 

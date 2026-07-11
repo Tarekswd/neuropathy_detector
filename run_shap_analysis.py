@@ -13,7 +13,7 @@ import shap
 
 import sys
 
-# neuropathy_detector/ is the script dir; project root is one level up (contains models/)
+# for_github/ is the script dir; project root is one level up (contains models/)
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
 for _p in (str(_SCRIPT_DIR), str(_PROJECT_ROOT)):
@@ -153,10 +153,16 @@ def run_analysis(model_path: Path, train_data: Path, test_data: Path, task: str,
         train_feature_names = test_feature_names
 
     explainer, _ = _build_explainer(pipeline, X_train_proc, train_feature_names)
-    shap_values = explainer(X_test_proc)
+    if task == "binary":
+        shap_values = explainer(X_test_proc)
+    else:
+        shap_values = explainer(X_test_proc)
 
     if isinstance(shap_values, list):
-        shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+        if len(shap_values) > 1:
+            shap_values = shap_values[1]
+        else:
+            shap_values = shap_values[0]
 
     if hasattr(shap_values, "values"):
         values = shap_values.values
@@ -168,6 +174,7 @@ def run_analysis(model_path: Path, train_data: Path, test_data: Path, task: str,
         values = values[:, :, 1] if values.shape[2] >= 2 else values[:, :, 0]
     if values.ndim != 2:
         values = values.reshape(values.shape[0], -1)
+
     if values.shape[1] != len(train_feature_names):
         values = values[:, : len(train_feature_names)]
 
@@ -188,12 +195,16 @@ def run_analysis(model_path: Path, train_data: Path, test_data: Path, task: str,
     # Beeswarm plot — shap.summary_plot manages its own figure
     shap.summary_plot(values, X_test_proc, feature_names=train_feature_names, max_display=max_display, show=False)
     fig = plt.gcf()
-    out_png = output_dir / (out_png_name if out_png_name else "shap_summary_beeswarm.png")
+    if out_png_name is None:
+        out_png = output_dir / "shap_summary_beeswarm.png"
+    else:
+        out_png = output_dir / out_png_name
     save_plot(fig, out_png)
 
-    # Bar plot of mean absolute SHAP values
+    # Produce a bar plot of mean absolute SHAP values for all features
     try:
         bar_fig, bar_ax = plt.subplots(figsize=(10, max(4, 0.25 * len(train_feature_names))))
+        # ensure we plot in descending importance order
         imp_sorted = importance_df.sort_values("mean_abs_shap", ascending=True)
         bar_ax.barh(imp_sorted["feature"], imp_sorted["mean_abs_shap"], color="tab:blue")
         bar_ax.set_xlabel("Mean |SHAP value|")
@@ -238,12 +249,13 @@ def main() -> None:
         train_path = args.train_data
         test_path = args.test_data
 
+    # If user requests both best models, attempt to locate them and run SHAP for each.
     if getattr(args, "use_best_both", False):
         print(f"Running SHAP analysis for saved best {analysis_label} models: binary and multiclass.")
-        best_model_dir = args.grouped_model_dir if analysis_label == "grouped" else args.best_model_dir
-        print(f"Best-model directory: {best_model_dir}")
+        print(f"Best-model directory: {args.grouped_model_dir if analysis_label == 'grouped' else args.best_model_dir}")
         print(f"Output root: {args.output_dir / output_label_dir}")
 
+        best_model_dir = args.grouped_model_dir if analysis_label == "grouped" else args.best_model_dir
         binary_path = best_model_dir / "best_model_binary.joblib"
         multi_path = best_model_dir / "best_model_multiclass.joblib"
 
@@ -252,15 +264,17 @@ def main() -> None:
         if not multi_path.exists():
             raise FileNotFoundError(f"Best multiclass model not found at {multi_path}")
 
+        # Run SHAP for binary
         print("\n=== SHAP for best binary model ===")
-        run_analysis(binary_path, train_path, test_path, "binary",
-                     args.output_dir / output_label_dir / "binary",
-                     args.max_display, out_png_name=f"{analysis_label}_shap_best_binary.png")
+        binary_output_dir = args.output_dir / output_label_dir / "binary"
+        binary_png = f"{analysis_label}_shap_best_binary.png"
+        run_analysis(binary_path, train_path, test_path, "binary", binary_output_dir, args.max_display, out_png_name=binary_png)
 
+        # Run SHAP for multiclass
         print("\n=== SHAP for best multiclass model ===")
-        run_analysis(multi_path, train_path, test_path, "multiclass",
-                     args.output_dir / output_label_dir / "multiclass",
-                     args.max_display, out_png_name=f"{analysis_label}_shap_best_multiclass.png")
+        multi_output_dir = args.output_dir / output_label_dir / "multiclass"
+        multi_png = f"{analysis_label}_shap_best_multiclass.png"
+        run_analysis(multi_path, train_path, test_path, "multiclass", multi_output_dir, args.max_display, out_png_name=multi_png)
         return
 
     print(f"Running SHAP analysis for model: {args.model_path}")

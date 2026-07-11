@@ -134,18 +134,6 @@ def main() -> None:
         axis=1,
     )
 
-    # ------------------------------------------------------------------ #
-    # Combined (all patients) dataset — train + test, z-norm with train stats
-    # Tagged with a 'split' column so downstream scripts can distinguish.
-    # Used by per-fold confusion-matrix graphing so ALL patients are
-    # included, not just the 80 % training partition.
-    # ------------------------------------------------------------------ #
-    train_tagged = train_ready_df.copy()
-    train_tagged.insert(0, "split", "train")
-    test_tagged = test_ready_df.copy()
-    test_tagged.insert(0, "split", "test")
-    all_ready_df = pd.concat([train_tagged, test_tagged], ignore_index=True)
-
     encoding_df = pd.DataFrame(
         {
             "group": GROUP_ORDER,
@@ -156,7 +144,6 @@ def main() -> None:
     raw_path = OUTPUT_ROOT / "grouped_patient_features.csv"
     train_path = OUTPUT_ROOT / "grouped_patient_features_train.csv"
     test_path = OUTPUT_ROOT / "grouped_patient_features_test.csv"
-    all_path = OUTPUT_ROOT / "grouped_patient_features_all.csv"
     stats_path = OUTPUT_ROOT / "grouped_patient_feature_scaler_stats.csv"
     encoding_path = OUTPUT_ROOT / "grouped_patient_class_encoding.csv"
     split_path = OUTPUT_ROOT / "grouped_patient_split_manifest.json"
@@ -164,7 +151,6 @@ def main() -> None:
     grouped_df.to_csv(raw_path, index=False)
     train_ready_df.to_csv(train_path, index=False)
     test_ready_df.to_csv(test_path, index=False)
-    all_ready_df.to_csv(all_path, index=False)
     train_stats_df.to_csv(stats_path, index=False)
     encoding_df.to_csv(encoding_path, index=False)
     split_path.write_text(json.dumps(split_info, indent=2), encoding="utf-8")
@@ -175,11 +161,9 @@ def main() -> None:
         f"({split_info['train_events']} events) / {len(split_info['test_subjects'])} test subjects "
         f"({split_info['test_events']} events)"
     )
-    print(f"All patients combined (train + test): {len(all_ready_df)} rows, {all_ready_df['subject_id'].nunique()} subjects")
     print(f"Saved grouped patient features -> {raw_path}")
     print(f"Saved train-ready features (z-norm on train only) -> {train_path}")
     print(f"Saved test-ready features (z-norm using train stats) -> {test_path}")
-    print(f"Saved all-patients features (train + test, z-norm with train stats) -> {all_path}")
     print(f"Saved scaler stats -> {stats_path}")
     print(f"Saved split manifest -> {split_path}")
 

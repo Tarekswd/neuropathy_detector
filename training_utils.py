@@ -124,6 +124,33 @@ def load_train_test_datasets(train_path: Path, test_path: Path, task: str):
     return X_train, X_test, y_train, y_test, groups_train, groups_test, feature_columns
 
 
+def load_full_dataset(
+    data_paths: list[Path] | tuple[Path, ...], task: str
+) -> tuple[pd.DataFrame, pd.Series, np.ndarray, list[str]]:
+    if not data_paths:
+        raise ValueError("No input datasets were provided.")
+
+    frames = []
+    for data_path in data_paths:
+        frame = _read_feature_frame(Path(data_path))
+        for required in {"group", "class_id", "subject_id"}:
+            if required not in frame.columns:
+                raise ValueError(f"Missing column '{required}' in {data_path}")
+        frames.append(frame)
+
+    combined_df = pd.concat(frames, ignore_index=True)
+    feature_columns = _feature_columns(combined_df)
+    for frame in frames:
+        frame_feature_columns = _feature_columns(frame)
+        if frame_feature_columns != feature_columns:
+            raise ValueError("All input datasets must share the same feature columns.")
+
+    X = combined_df[feature_columns]
+    y = _labels_from_frame(combined_df, task)
+    groups = combined_df["subject_id"].astype(str).values
+    return X, y, groups, feature_columns
+
+
 def load_split_manifest(path: Path = DEFAULT_SPLIT_MANIFEST) -> dict:
     if not path.exists():
         return {}
@@ -262,6 +289,100 @@ def evaluate_pipeline(pipeline, X, y, task: str) -> dict:
     return compute_metrics(y, y_pred, y_scores, task=task)
 
 
+def _majority_vote(labels: np.ndarray) -> int:
+    counts = pd.Series(labels).value_counts()
+    max_count = counts.max()
+    tied = sorted(int(np.asarray(label).item()) for label, count in counts.items() if count == max_count)
+    return tied[0]
+
+
+def evaluate_patient_level_from_predictions(
+    y_true,
+    y_pred,
+    groups,
+    task: str,
+    y_scores=None,
+    classes=None,
+) -> tuple[dict, list[dict]]:
+    y_true = np.asarray(y_true).astype(int)
+    y_pred = np.asarray(y_pred)
+    if y_pred.ndim > 1 and y_pred.shape[1] == 1:
+        y_pred = y_pred[:, 0]
+    y_pred = y_pred.astype(int)
+    groups = np.asarray(groups).astype(str)
+
+    patient_true: list[int] = []
+    patient_pred: list[int] = []
+    patient_scores: list[np.ndarray | float] = []
+    patient_rows: list[dict] = []
+
+    for subject_id in sorted(np.unique(groups)):
+        mask = groups == subject_id
+        subject_true_values = np.unique(y_true[mask])
+        if len(subject_true_values) != 1:
+            raise ValueError(f"Patient {subject_id} has inconsistent labels: {subject_true_values.tolist()}")
+
+        true_label = int(subject_true_values[0])
+        subject_event_pred = y_pred[mask]
+        score_payload = None
+
+        if y_scores is not None:
+            subject_scores = np.asarray(y_scores)[mask]
+            if (
+                subject_scores.ndim == 2
+                and subject_scores.shape[1] > 1
+                and classes is not None
+                and len(classes) == subject_scores.shape[1]
+            ):
+                mean_scores = subject_scores.mean(axis=0)
+                pred_label = int(classes[int(np.argmax(mean_scores))])
+                score_payload = mean_scores
+            elif subject_scores.ndim == 1:
+                mean_score = float(subject_scores.mean())
+                pred_label = int(mean_score >= 0.0) if task == "binary" else _majority_vote(subject_event_pred)
+                score_payload = mean_score
+            else:
+                pred_label = _majority_vote(subject_event_pred)
+        else:
+            pred_label = _majority_vote(subject_event_pred)
+
+        patient_true.append(true_label)
+        patient_pred.append(pred_label)
+        if score_payload is not None:
+            patient_scores.append(score_payload)
+        patient_rows.append(
+            {
+                "subject_id": subject_id,
+                "true_label": true_label,
+                "predicted_label": pred_label,
+                "event_count": int(mask.sum()),
+                "event_predictions": [int(value) for value in subject_event_pred.tolist()],
+                "aggregation": "mean_scores" if score_payload is not None else "majority_vote",
+            }
+        )
+
+    y_scores_out = None
+    if len(patient_scores) == len(patient_true):
+        y_scores_out = np.asarray(patient_scores)
+
+    return compute_metrics(patient_true, patient_pred, y_scores_out, task=task), patient_rows
+
+
+def evaluate_patient_level_from_events(pipeline, X, y, groups, task: str) -> tuple[dict, list[dict]]:
+    """Predict event rows, then aggregate those predictions to one row per patient."""
+    event_pred = np.asarray(pipeline.predict(X)).astype(int)
+    event_scores = _score_matrix(pipeline, X)
+    classes = np.asarray(getattr(pipeline, "classes_", []), dtype=int)
+    return evaluate_patient_level_from_predictions(
+        y,
+        event_pred,
+        groups,
+        task,
+        y_scores=event_scores,
+        classes=classes,
+    )
+
+
 def subject_cross_validation(
     pipeline_factory: Callable[[], Pipeline],
     X,
@@ -274,13 +395,31 @@ def subject_cross_validation(
 ) -> dict:
     cv = StratifiedGroupKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
     fold_metrics: list[dict] = []
+    oof_true: list[int] = []
+    oof_pred: list[int] = []
+    oof_groups: list[str] = []
 
     for _, (train_idx, val_idx) in enumerate(cv.split(X, y, groups), start=1):
         pipeline = pipeline_factory()
-        pipeline.fit(X.iloc[train_idx], y.iloc[train_idx])
-        fold_metrics.append(evaluate_pipeline(pipeline, X.iloc[val_idx], y.iloc[val_idx], task))
+        if hasattr(X, "iloc"):
+            X_train = X.iloc[train_idx]
+            X_val = X.iloc[val_idx]
+            y_train = y.iloc[train_idx]
+            y_val = y.iloc[val_idx]
+        else:
+            X_train = X[train_idx]
+            X_val = X[val_idx]
+            y_train = y[train_idx]
+            y_val = y[val_idx]
 
-    summary: dict = {"folds": cv_folds, "data": "train_split_only"}
+        pipeline.fit(X_train, y_train)
+        val_pred = np.asarray(pipeline.predict(X_val)).astype(int)
+        fold_metrics.append(evaluate_pipeline(pipeline, X_val, y_val, task))
+        oof_true.extend(np.asarray(y_val).astype(int).tolist())
+        oof_pred.extend(val_pred.tolist())
+        oof_groups.extend(np.asarray(groups)[val_idx].astype(str).tolist())
+
+    summary: dict = {"folds": cv_folds, "data": "all_data_subject_cv", "fold_metrics": fold_metrics}
     for key in [
         "auc",
         "balanced_accuracy",
@@ -294,6 +433,16 @@ def subject_cross_validation(
         if values:
             summary[f"{key}_mean"] = float(np.mean(values))
             summary[f"{key}_std"] = float(np.std(values))
+
+    if oof_true:
+        summary["event_metrics"] = compute_metrics(np.asarray(oof_true), np.asarray(oof_pred), task=task)
+        summary["patient_metrics"], summary["patient_predictions"] = evaluate_patient_level_from_predictions(
+            np.asarray(oof_true),
+            np.asarray(oof_pred),
+            np.asarray(oof_groups),
+            task,
+        )
+
     summary["last_confusion_matrix"] = fold_metrics[-1]["confusion_matrix"]
     return summary
 
@@ -316,7 +465,7 @@ def print_metrics(model_name: str, task: str, metrics: dict, label: str = "Test"
 
 
 def print_cv_summary(cv_summary: dict) -> None:
-    print("\nSubject-level cross-validation on train split:")
+    print("\nSubject-level cross-validation on all available data:")
     for key in [
         "auc",
         "balanced_accuracy",

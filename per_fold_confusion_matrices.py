@@ -4,79 +4,39 @@ import json
 import glob
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
+
 import numpy as np
 import joblib
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from sklearn.base import clone
 from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix
-
 import pandas as pd
 
-# Ensure project root is on sys.path so 'models' package is importable
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from models.model_builders import MULTICLASS_LABELS
+from training_utils import load_full_dataset, DEFAULT_TRAIN_PATH, DEFAULT_TEST_PATH
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = _PROJECT_ROOT
 TUNED_DIR = PROJECT_ROOT / "models" / "tuned"
-OUT_DIR = PROJECT_ROOT / "models" / "per_fold_confusion_matrices"
+OUT_DIR = PROJECT_ROOT / "models" / "per_fold_confusion_matrices" / "ungrouped"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# We will reuse tune_models' CV splitter to ensure same folds when possible
 try:
     from models.tune_models import StratifiedGroupKFold, FAST_SEARCH_SETTINGS
 except Exception:
     from sklearn.model_selection import StratifiedGroupKFold
     FAST_SEARCH_SETTINGS = {}
 
-# Path to the full-cohort dataset produced by extract_npy_features.py
-# (train + test rows combined, z-normalised with train stats, tagged with 'split').
-DEFAULT_ALL_PATH = PROJECT_ROOT / "ml_features" / "npy_features_all.csv"
-
 
 def load_metrics_files():
-    # target tuned outputs (joblib) or metrics jsons
     tuned_files = sorted(glob.glob(str(TUNED_DIR / "*_tuned.joblib")))
     metrics_files = sorted(glob.glob(str(TUNED_DIR / "*_metrics.json")))
     return tuned_files, metrics_files
-
-
-def load_all_dataset(all_path: Path, task: str):
-    """Load the full-cohort feature CSV (train + test combined).
-
-    The 'split' tag column is stripped before returning so the DataFrame
-    has the same schema as the individual train/test CSVs.
-    Returns (X, y, groups, feature_cols).
-    """
-    from models.training_utils import METADATA_COLUMNS, BINARY_POSITIVE_GROUPS
-
-    df = pd.read_csv(all_path)
-    # Drop the 'split' tag column if present
-    if "split" in df.columns:
-        df = df.drop(columns=["split"])
-
-    meta = METADATA_COLUMNS.union({"event_count", "event_ids", "source_folders"})
-    feature_cols = [
-        c for c in df.select_dtypes(include="number").columns if c not in meta
-    ]
-    if not feature_cols:
-        raise ValueError(f"No numeric feature columns found in {all_path}")
-
-    if task == "binary":
-        y = df["group"].isin(BINARY_POSITIVE_GROUPS).astype(int)
-    elif task == "multiclass":
-        y = df["class_id"].astype(int)
-    else:
-        raise ValueError(f"Unknown task: {task}")
-
-    X = df[feature_cols]
-    groups = df["subject_id"].astype(str).values
-    return X, y, groups, feature_cols
 
 
 def _take_rows(data, indices):
@@ -85,88 +45,88 @@ def _take_rows(data, indices):
     return data[indices]
 
 
-def _full_confusion_frame(y_true, y_pred, task: str) -> tuple[pd.DataFrame, list[int]]:
-    labels = [0, 1] if task == "binary" else list(MULTICLASS_LABELS)
-    y_true_arr = np.asarray(y_true).ravel()
-    y_pred_arr = np.asarray(y_pred).ravel()
-    cm = pd.DataFrame(
-        confusion_matrix(y_true_arr, y_pred_arr, labels=labels),
-        index=labels,
-        columns=labels,
-    )
-    return cm, labels
+def _labels(task: str) -> list[int]:
+    return [0, 1] if task == "binary" else list(MULTICLASS_LABELS)
 
 
-def compute_per_fold_confusion(estimator, X, y, groups, cv, task: str):
-    cms = []
-    for train_idx, val_idx in cv.split(X, y, groups):
-        X_tr, X_val = _take_rows(X, train_idx), _take_rows(X, val_idx)
-        y_tr, y_val = _take_rows(y, train_idx), _take_rows(y, val_idx)
-        est = clone(estimator)
-        est.fit(X_tr, y_tr)
-        y_pred = est.predict(X_val)
-        if hasattr(y_pred, "ndim") and y_pred.ndim > 1:
-            y_pred = y_pred.ravel()
-        y_true_series = pd.Series(y_val).ravel() if not isinstance(y_val, pd.Series) else y_val
-        cm, _ = _full_confusion_frame(y_true_series, y_pred, task)
-        cms.append(cm)
-    return cms
+def _build_fresh_pipeline(artifact: dict, task: str, n_features: int):
+    """Rebuild a pipeline from scratch using the artifact's best_params."""
+    from models.model_builders import build_model
+    from training_utils import build_pipeline
+
+    model_name = artifact.get("model_name") or artifact.get("model")
+    if not isinstance(model_name, str):
+        # artifact["model"] may be the fitted pipeline itself — clone it
+        from sklearn.base import clone
+        return clone(artifact["model"])
+
+    pipeline = build_pipeline(build_model(model_name, task, 42), None, n_features)
+    best_params = artifact.get("best_params") or {}
+    if best_params:
+        try:
+            pipeline.set_params(**best_params)
+        except Exception:
+            pass
+    return pipeline
 
 
 def aggregate_subject_data(X, y, groups, feature_cols):
-    if isinstance(X, pd.DataFrame):
-        df = X.copy()
-    else:
-        df = pd.DataFrame(X, columns=feature_cols)
-    df["subject_id"] = pd.Series(groups)
-    df["label"] = pd.Series(y.values if hasattr(y, "values") else y)
+    df = X.copy() if isinstance(X, pd.DataFrame) else pd.DataFrame(X, columns=feature_cols)
+    df["subject_id"] = pd.Series(groups, index=df.index)
+    df["label"] = pd.Series(y.values if hasattr(y, "values") else y, index=df.index)
     grouped = df.groupby("subject_id")
     grouped_X = grouped[feature_cols].mean()
+
     def _mode_or_first(s):
         m = s.mode()
         return int(m.iloc[0]) if not m.empty else int(s.iloc[0])
+
     grouped_y = grouped["label"].agg(_mode_or_first).astype(int)
     grouped_subjects = grouped_X.index.to_numpy(dtype=str)
     return grouped_X, grouped_y, grouped_subjects
 
 
-def compute_grouped_per_fold_confusion(estimator, X, y, groups, feature_cols, cv, task: str):
+def compute_grouped_per_fold_confusion(artifact: dict, X, y, groups, feature_cols, cv, task: str):
+    """
+    Aggregate events → one row per subject, then run 5-fold CV.
+    The 5 val sets cover all subjects, so summing gives the full subject-level matrix.
+    """
     grouped_X, grouped_y, grouped_subjects = aggregate_subject_data(X, y, groups, feature_cols)
+    labels = _labels(task)
     cms = []
     for train_idx, val_idx in cv.split(grouped_X, grouped_y, grouped_subjects):
         X_tr = _take_rows(grouped_X, train_idx)
         y_tr = _take_rows(grouped_y, train_idx)
         X_val = _take_rows(grouped_X, val_idx)
         y_val = _take_rows(grouped_y, val_idx)
-        est = clone(estimator)
+
+        est = _build_fresh_pipeline(artifact, task, grouped_X.shape[1])
         est.fit(X_tr, y_tr)
         y_pred = est.predict(X_val)
         if hasattr(y_pred, "ndim") and y_pred.ndim > 1:
             y_pred = y_pred.ravel()
-        y_true_series = pd.Series(y_val).ravel() if not isinstance(y_val, pd.Series) else y_val
-        cm, _ = _full_confusion_frame(y_true_series, y_pred, task)
+
+        cm = pd.DataFrame(
+            confusion_matrix(np.asarray(y_val).ravel(), np.asarray(y_pred).ravel(), labels=labels),
+            index=labels,
+            columns=labels,
+        )
         cms.append(cm)
     return cms
 
 
 def save_confusion_matrix_png(cm, out_path: Path, title: str) -> None:
     if isinstance(cm, pd.DataFrame):
-        if cm.empty:
-            labels = ["empty"]
-            matrix = np.zeros((1, 1), dtype=int)
-        else:
-            labels = [str(x) for x in cm.index.tolist()]
-            matrix = cm.to_numpy(dtype=int)
+        labels = [str(x) for x in cm.index.tolist()] if not cm.empty else ["empty"]
+        matrix = cm.to_numpy(dtype=int) if not cm.empty else np.zeros((1, 1), dtype=int)
     else:
         matrix = np.asarray(cm, dtype=int)
-        if matrix.size == 0:
-            labels = ["empty"]
+        labels = [str(i) for i in range(matrix.shape[0])] if matrix.size else ["empty"]
+        if not matrix.size:
             matrix = np.zeros((1, 1), dtype=int)
-        else:
-            labels = [str(i) for i in range(matrix.shape[0])]
 
     fig, ax = plt.subplots(figsize=(6, 5))
-    if matrix.size and matrix.shape[0] > 0 and matrix.shape[1] > 0:
+    if matrix.size and matrix.shape[0] > 0:
         disp = ConfusionMatrixDisplay(confusion_matrix=matrix, display_labels=labels)
         disp.plot(ax=ax, cmap="Blues", values_format="d")
     else:
@@ -179,123 +139,83 @@ def save_confusion_matrix_png(cm, out_path: Path, title: str) -> None:
     plt.close(fig)
 
 
+def _sum_cms(cms: list[pd.DataFrame]) -> pd.DataFrame | None:
+    summed = None
+    for cm in cms:
+        summed = cm.copy() if summed is None else summed.add(cm, fill_value=0).astype(int)
+    return summed
+
+
+def _cm_to_dict(cm: Any) -> dict:
+    if isinstance(cm, pd.DataFrame):
+        return cm.to_dict()
+    try:
+        return pd.DataFrame(cm).to_dict()
+    except Exception:
+        return {}
+
+
 def run():
-    tuned_files, metrics_files = load_metrics_files()
-    if not tuned_files and not metrics_files:
+    tuned_files, _ = load_metrics_files()
+    if not tuned_files:
         print("No tuned artifacts found in", TUNED_DIR)
         return
 
-    # prefer joblib tuned artifacts; fall back to metric entries to locate models in other folders
     processed = 0
     for tf in tuned_files:
         print("Processing:", tf)
         artifact = joblib.load(tf)
-        model = artifact.get("model_name") or artifact.get("model")
+        model_name = artifact.get("model_name") or artifact.get("model")
         task = artifact.get("task")
-        features = artifact.get("features")
         best_params = artifact.get("best_params")
 
-        # try to locate original dataset used during tuning
-        from models.training_utils import load_train_test_datasets, DEFAULT_TRAIN_PATH, DEFAULT_TEST_PATH
+        train_path = artifact.get("train_data_path") or artifact.get("train_path") or DEFAULT_TRAIN_PATH
+        test_path = artifact.get("test_data_path") or artifact.get("test_path") or DEFAULT_TEST_PATH
 
-        # many artifacts store the train/test paths used during tuning; try to read them
-        train_path = artifact.get("train_data_path") or artifact.get("train_path")
-        test_path = artifact.get("test_data_path") or artifact.get("test_path")
-        if train_path is None:
-            train_path = DEFAULT_TRAIN_PATH
-        if test_path is None:
-            test_path = DEFAULT_TEST_PATH
+        # Use 100% of data: train + test combined
+        X_full, y_full, groups_full, feature_cols = load_full_dataset(
+            [Path(train_path), Path(test_path)], task
+        )
 
-        # -------------------------------------------------------------- #
-        # For per-fold confusion-matrix GRAPHING we want ALL events and
-        # patients, not just the 80 % training partition.  Prefer the
-        # combined all-events CSV produced by extract_npy_features.py;
-        # fall back to train-only if it doesn't exist yet.
-        # -------------------------------------------------------------- #
-        all_path_candidate = Path(train_path).parent / "npy_features_all.csv"
-        if not all_path_candidate.exists():
-            all_path_candidate = DEFAULT_ALL_PATH
-
-        if all_path_candidate.exists():
-            print(f"  [full cohort] Loading all events from {all_path_candidate.name}")
-            X_all, y_all, groups_all, feature_cols = load_all_dataset(all_path_candidate, task)
-        else:
-            print("  [warn] npy_features_all.csv not found — falling back to train split only.")
-            print("  Run extract_npy_features.py first to generate the full-cohort CSV.")
-            X_train, X_test, y_train, y_test, groups_train, groups_test, feature_cols = load_train_test_datasets(
-                Path(train_path), Path(test_path), task
-            )
-            X_all, y_all, groups_all = X_train, y_train, groups_train
-
-        # determine cv folds used
-        fast = FAST_SEARCH_SETTINGS.get(artifact.get("model_name") or artifact.get("model_name"), {}) if FAST_SEARCH_SETTINGS else {}
+        fast = FAST_SEARCH_SETTINGS.get(model_name, {}) if isinstance(model_name, str) else {}
         cv_folds = int(fast.get("cv_folds", 5))
         cv = StratifiedGroupKFold(n_splits=cv_folds, shuffle=True, random_state=42)
 
-        # compute per-fold confusion matrices at event-level (full cohort)
-        cms_event = compute_per_fold_confusion(artifact["model"], X_all, y_all, groups_all, cv, task)
-
-        # compute per-fold grouped confusion using subject-level aggregation (full cohort)
-        cms_grouped = compute_grouped_per_fold_confusion(
-            artifact["model"],
-            X_all,
-            y_all,
-            groups_all,
-            feature_cols,
-            cv,
-            task,
+        # --- subject-level per-fold confusion matrices ---
+        cms_patient = compute_grouped_per_fold_confusion(
+            artifact, X_full, y_full, groups_full, feature_cols, cv, task
         )
+        summed_patient = _sum_cms(cms_patient)
 
-        def _cm_to_dict(cm):
-            if isinstance(cm, pd.DataFrame):
-                return cm.to_dict()
-            if isinstance(cm, dict):
-                return cm
-            try:
-                return pd.DataFrame(cm).to_dict()
-            except Exception:
-                return {}
-
-        png_dir_event = OUT_DIR / "png" / "event"
-        for fold_idx, cm in enumerate(cms_event, start=1):
-            png_path = png_dir_event / f"{Path(tf).stem}_fold{fold_idx}_confusion.png"
-            save_confusion_matrix_png(cm, png_path, title=f"{Path(tf).stem} fold {fold_idx} (Event)")
-
-        # Summed (accumulated) confusion matrix across all folds — ungrouped / event-level
-        summed_event_cm = None
-        for cm in cms_event:
-            if summed_event_cm is None:
-                summed_event_cm = cm.copy()
-            else:
-                summed_event_cm = summed_event_cm.add(cm, fill_value=0).astype(int)
-        if summed_event_cm is not None:
-            summed_png_path = png_dir_event / f"{Path(tf).stem}_summed_confusion.png"
+        stem = Path(tf).stem
+        png_dir = OUT_DIR / "png"
+        for fold_idx, cm in enumerate(cms_patient, start=1):
             save_confusion_matrix_png(
-                summed_event_cm,
-                summed_png_path,
-                title=f"{Path(tf).stem} Summed over {len(cms_event)} Folds (Event)",
+                cm, png_dir / f"{stem}_fold{fold_idx}_confusion.png",
+                title=f"{stem} fold {fold_idx} (Patient-level)"
             )
-            print("  Summed event confusion matrix ->", summed_png_path)
-
-        png_dir_grouped = OUT_DIR / "png" / "grouped"
-        for fold_idx, cm in enumerate(cms_grouped, start=1):
-            png_path = png_dir_grouped / f"{Path(tf).stem}_fold{fold_idx}_confusion.png"
-            save_confusion_matrix_png(cm, png_path, title=f"{Path(tf).stem} fold {fold_idx} (Grouped)")
+        if summed_patient is not None:
+            save_confusion_matrix_png(
+                summed_patient, png_dir / f"{stem}_summed_confusion.png",
+                title=f"{stem} Summed {len(cms_patient)} Folds (Patient-level, n={int(summed_patient.values.sum())})"
+            )
+            print(f"  Summed patient CM (total={int(summed_patient.values.sum())}) -> {png_dir / f'{stem}_summed_confusion.png'}")
 
         out = {
             "artifact": tf,
-            "model": model,
+            "model": str(model_name),
             "task": task,
             "best_params": best_params,
-            "per_fold_event_confusion": [_cm_to_dict(cm) for cm in cms_event],
-            "summed_event_confusion": _cm_to_dict(summed_event_cm) if summed_event_cm is not None else {},
-            "per_fold_grouped_confusion": [_cm_to_dict(cm) for cm in cms_grouped],
+            "n_total_patients": int(summed_patient.values.sum()) if summed_patient is not None else 0,
+            "cv_folds": cv_folds,
+            "per_fold_patient_confusion": [_cm_to_dict(cm) for cm in cms_patient],
+            "summed_patient_confusion": _cm_to_dict(summed_patient) if summed_patient is not None else {},
         }
 
-        out_path = OUT_DIR / (Path(tf).stem + "_per_fold_confusion.json")
+        out_path = OUT_DIR / f"{stem}_per_fold_confusion.json"
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=2)
-        print("Wrote ->", out_path)
+        print(f"  Wrote -> {out_path}")
         processed += 1
 
     print(f"Processed {processed} tuned artifacts.")

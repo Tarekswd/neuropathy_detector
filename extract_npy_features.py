@@ -218,19 +218,6 @@ def main() -> None:
     train_df, _ = z_normalize_dataframe(train_raw_df, feature_columns, stats_df=train_stats_df)
     test_df, _ = z_normalize_dataframe(test_raw_df, feature_columns, stats_df=train_stats_df)
 
-    # ------------------------------------------------------------------ #
-    # Combined (all events) dataset — train + test, z-norm with train stats
-    # Tagged with a 'split' column so downstream scripts can distinguish.
-    # This is the dataset used by per-fold confusion-matrix graphing so
-    # that ALL events/patients are visible across folds, not just the 80 %
-    # training partition.
-    # ------------------------------------------------------------------ #
-    train_df_tagged = train_df.copy()
-    train_df_tagged.insert(0, "split", "train")
-    test_df_tagged = test_df.copy()
-    test_df_tagged.insert(0, "split", "test")
-    all_df = pd.concat([train_df_tagged, test_df_tagged], ignore_index=True)
-
     encoding_df = pd.DataFrame(
         {
             "group": GROUP_ORDER,
@@ -241,7 +228,6 @@ def main() -> None:
     raw_path = OUTPUT_DIR / "npy_features_raw.csv"
     train_path = OUTPUT_DIR / "npy_features_train.csv"
     test_path = OUTPUT_DIR / "npy_features_test.csv"
-    all_path = OUTPUT_DIR / "npy_features_all.csv"
     encoding_path = OUTPUT_DIR / "npy_class_encoding.csv"
     stats_path = OUTPUT_DIR / "npy_feature_scaler_stats.csv"
     split_path = OUTPUT_DIR / "npy_split_manifest.json"
@@ -249,7 +235,6 @@ def main() -> None:
     raw_df.to_csv(raw_path, index=False)
     train_df.to_csv(train_path, index=False)
     test_df.to_csv(test_path, index=False)
-    all_df.to_csv(all_path, index=False)
     encoding_df.to_csv(encoding_path, index=False)
     train_stats_df.to_csv(stats_path, index=False)
     split_path.write_text(json.dumps(split_info, indent=2), encoding="utf-8")
@@ -261,11 +246,9 @@ def main() -> None:
         f"{len(split_info['test_subjects'])} test subjects "
         f"({split_info['test_events']} events)"
     )
-    print(f"All events combined (train + test): {len(all_df)} rows, {all_df['subject_id'].nunique()} subjects")
     print(f"Saved raw features -> {raw_path}")
     print(f"Saved train features (z-norm fit on train only) -> {train_path}")
     print(f"Saved test features (z-norm with train stats) -> {test_path}")
-    print(f"Saved all features (train + test, z-norm with train stats) -> {all_path}")
     print(f"Saved class encoding -> {encoding_path}")
     print(f"Saved train scaler stats -> {stats_path}")
     print(f"Saved split manifest -> {split_path}")
