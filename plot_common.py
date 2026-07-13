@@ -46,7 +46,7 @@ def plot_pressure_heatmap(
     array: np.ndarray,
     *,
     title: str,
-    cmap: str = "hot",
+    cmap: str = "inferno",
     vmax: float | None = None,
 ) -> None:
     data = np.asarray(array, dtype=float)

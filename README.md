@@ -32,13 +32,18 @@ This repository contains a complete, end-to-end ML workflow that:
 ## Repository Structure
 
 ```
-neuropathy_detector/
+for_github/
 │
 ├── Data Preparation
 │   ├── xml_fix.py                             # Repair malformed Zebris XML exports
 │   ├── npy_fix.py                             # Normalize and correct raw .npy pressure maps
 │   ├── extract_npy_features.py                # Extract per-region biomechanical features from .npy
-│   └── extract_grouped_footprint_features.py  # Aggregate event features into one row per patient
+│   ├── extract_grouped_footprint_features.py  # Aggregate event features into one row per patient
+│   │                                          #   → also produces grouped_patient_features_all.csv
+│   │                                          #     (train + test tagged) needed for per-fold CMs
+│   └── prepare_grouped_footprint_datasets.py  # ⚠ Earlier version of the above — SUPERSEDED.
+│                                              #   Does NOT produce the _all.csv combined dataset.
+│                                              #   Kept for reference only; use extract_grouped_footprint_features.py.
 │
 ├── Visualization
 │   ├── plot_xml_footprints.py                 # Max-pressure PNGs and rollover GIFs from XML (hot colormap)
@@ -46,18 +51,18 @@ neuropathy_detector/
 │   ├── plotting_npy_graph.py                  # Time-series and metric graphs from .npy data
 │   ├── plot_descriptive_counts.py             # Descriptive statistics and count plots
 │   ├── plot_confusion_matrices.py             # Confusion matrix visualizations
-│   ├── plot_features_grid.py                  # Feature distribution grid plots
 │   ├── generate_grouped_confusion_matrices.py # Per-group confusion matrix generation
 │   ├── plot_common.py                         # Shared plotting utilities and hot colormap default
-│   └── run_all_plots.py                       # Orchestrator: run all visualization scripts
+│   ├── run_all_plots.py                       # Orchestrator: run all visualization scripts
+│   └── generate_all_heatmaps.py               # Generate hot colormap heatmaps across all data types
 │
 ├── Model Training & Tuning
 │   ├── model_builders.py                      # Model factory (LR, SVM, RF, XGBoost, CatBoost)
 │   ├── training_utils.py                      # Pipeline builder, subject CV, metrics, sensitivity
 │   ├── tune_models.py                         # Hyperparameter tuning — ungrouped event-level features
-│   │                                          #   Phase 1: event-level CV (cv_metrics_summary)
-│   │                                          #   Phase 2: patient-level CV (patient_cv_metrics_summary)
-│   │                                          #   Saves best model per task by patient CV balanced accuracy
+│   │                                          #   Phase 1: event-level CV  → cv_metrics_summary
+│   │                                          #   Phase 2: patient-level CV → patient_cv_metrics_summary
+│   │                                          #   Best model per task selected by patient CV balanced accuracy
 │   └── tune_grouped_footprints.py             # Hyperparameter tuning — grouped patient footprint features
 │                                              #   Reports CV sensitivity mean ± std per model
 │
@@ -72,7 +77,9 @@ neuropathy_detector/
 │
 ├── SHAP Analysis
 │   ├── run_shap_analysis.py                   # SHAP beeswarm + bar plots for ungrouped best model
-│   └── run_grouped_shap_analysis.py           # SHAP analysis for grouped best model
+│   ├── run_grouped_shap_analysis.py           # SHAP analysis for grouped best model
+│   └── run_best_overall_shap.py               # SHAP for best overall model (binary & multiclass winners)
+│                                              #   Reads cross_comparison_report.json produced by compare_best_models.py
 │
 └── Reporting & Analysis
     ├── generate_model_reports.py              # Full per-model performance reports
@@ -109,7 +116,7 @@ Features are extracted across four plantar regions for each gait event:
 |--------|-------------|
 | `whole` | Full plantar surface |
 | `heel` | Posterior 31 % of foot |
-| `mid` | Midfoot 29 % of foot |
+| `mid` | Midfoot 21 % of foot |
 | `fore` | Anterior 48 % of foot |
 
 **Per-region metrics** extracted from `.npy` pressure maps:
@@ -154,7 +161,8 @@ Both summaries include mean ± std for all metrics and per-fold confusion matric
 | `best model/` | Best ungrouped model per task selected by patient CV balanced accuracy |
 | `best model/grouped/` | Best grouped model per task |
 | `model_comparison_tables/` | 4 PNG comparison tables (ungrouped/grouped × binary/multiclass) |
-| `shap_analysis/` | SHAP beeswarm, bar, and dependence plots |
+| `shap_analysis/` | SHAP beeswarm, bar, and dependence plots for ungrouped/grouped models |
+| `shap_analysis/best_overall/` | SHAP plots for the best overall binary and multiclass winners |
 | `output_plots/` | Per-subject max-pressure PNGs and rollover GIFs |
 | `graph_plots/` | Group-mean and sample footprint heatmaps, descriptive plots |
 
@@ -177,13 +185,13 @@ python npy_fix.py
 
 # 2. Extract features
 python extract_npy_features.py
-python extract_grouped_footprint_features.py
+python extract_grouped_footprint_features.py   # use this, not prepare_grouped_footprint_datasets.py
 
 # 3. Visualize pressure maps (hot colormap heatmaps + rollover GIFs)
 python run_all_plots.py
 
 # 4. Tune and train models
-python tune_models.py                          # all models, both tasks
+python tune_models.py                          # all models, both tasks (event-level + patient-level CV)
 python tune_grouped_footprints.py              # grouped patient footprints
 
 # 5. Evaluate
@@ -192,11 +200,12 @@ python evaluate_tuned_on_grouped.py
 
 # 6. Per-fold patient-level confusion matrices
 python per_fold_confusion_matrices.py          # ungrouped → models/per_fold_confusion_matrices/ungrouped/
-python grouped_data_models_fold_confusion_matrices.py  # grouped → models/per_fold_confusion_matrices/grouped/
+python grouped_data_models_fold_confusion_matrices.py  # grouped → .../grouped/
 
 # 7. SHAP analysis
-python run_shap_analysis.py
-python run_grouped_shap_analysis.py
+python run_shap_analysis.py                    # ungrouped best model
+python run_grouped_shap_analysis.py            # grouped best model
+python run_best_overall_shap.py                # best overall binary & multiclass winners
 
 # 8. Reports and comparison tables
 python generate_model_reports.py

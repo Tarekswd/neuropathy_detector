@@ -11,10 +11,13 @@ from scipy.ndimage import rotate
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 INPUT_ROOT = SCRIPT_DIR / "NPY_maps_oriented_new"
+if not INPUT_ROOT.exists() and (SCRIPT_DIR.parent / "NPY_maps_oriented_new").is_dir():
+	INPUT_ROOT = SCRIPT_DIR.parent / "NPY_maps_oriented_new"
 if (INPUT_ROOT / "NPY_maps_oriented_new").is_dir():
 	INPUT_ROOT = INPUT_ROOT / "NPY_maps_oriented_new"
 
 OUTPUT_ROOT = SCRIPT_DIR / "npy_fixed"
+RIGHT_ROTATED_ROOT = SCRIPT_DIR / "npy_right_rotated"
 
 
 def load_reference_map(event_dir: Path) -> np.ndarray:
@@ -111,6 +114,24 @@ def transform_array(array: np.ndarray, angle_deg: float, flip_left: bool) -> np.
 	return transformed
 
 
+def z_normalize_array(array: np.ndarray) -> np.ndarray:
+	mask = np.asarray(array) > 0
+	if not np.any(mask):
+		return np.asarray(array)
+
+	values = np.asarray(array, dtype=float)[mask]
+	mean_val = float(values.mean())
+	std_val = float(values.std(ddof=0))
+
+	normalized = np.asarray(array, dtype=float).copy()
+	if std_val > 1e-9:
+		normalized[mask] = (values - mean_val) / std_val
+	else:
+		normalized[mask] = 0.0
+
+	return normalized
+
+
 def process_event_folder(event_dir: Path) -> tuple[float, str]:
 	reference_map = load_reference_map(event_dir)
 	angle_deg = principal_axis_angle_deg(reference_map)
@@ -120,10 +141,22 @@ def process_event_folder(event_dir: Path) -> tuple[float, str]:
 	relative_dir = event_dir.relative_to(INPUT_ROOT)
 	output_dir = OUTPUT_ROOT / relative_dir
 	output_dir.mkdir(parents=True, exist_ok=True)
+	right_rotated_dir = RIGHT_ROTATED_ROOT / relative_dir
+	right_rotated_dir.mkdir(parents=True, exist_ok=True)
 
 	for npy_path in sorted(event_dir.glob("*.npy")):
 		array = np.load(npy_path)
+
+		# 1. Save right-rotated foot (flipped to right side if left, but before FPA step)
+		right_rotated = np.fliplr(array) if flip_left else array
+		if npy_path.name != "P_contact.npy":
+			right_rotated = z_normalize_array(right_rotated)
+		np.save(right_rotated_dir / npy_path.name, right_rotated)
+
+		# 2. Save final fixed foot (FPA step + flipped to right side if left)
 		transformed = transform_array(array, angle_deg, flip_left)
+		if npy_path.name != "P_contact.npy":
+			transformed = z_normalize_array(transformed)
 		np.save(output_dir / npy_path.name, transformed)
 
 	return angle_deg, detected_side

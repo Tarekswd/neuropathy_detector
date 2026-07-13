@@ -1,191 +1,224 @@
 """
-Generate 4 comparison tables (PNG) for model performance metrics:
-  1. Ungrouped — Binary
-  2. Ungrouped — Multiclass
-  3. Grouped   — Binary
-  4. Grouped   — Multiclass
-
-Each table shows 5 algorithms with CV mean ± std for every metric.
+Generate 4 comparison tables (as PNG images) for model performance metrics
+- 2 model types: tuned, grouped_tuned
+- 2 tasks: binary, multiclass
+- 5 algorithms per table: SVM, Random Forest, Logistic Regression, XGBoost, CatBoost
 """
 
 import json
-import sys
-from pathlib import Path
-
-import matplotlib.pyplot as plt
 import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from pathlib import Path
+import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
+# Configuration
 ALGORITHMS = ["svm", "rf", "lr", "xgb", "catboost"]
 TASKS = ["binary", "multiclass"]
-
-UNGROUPED_DIR = PROJECT_ROOT / "models" / "tuned"
-GROUPED_DIR = PROJECT_ROOT / "models" / "grouped_tuned"
-
-OUTPUT_DIR = PROJECT_ROOT / "model_comparison_tables"
-
-METRICS = ["balanced_accuracy", "accuracy", "sensitivity", "specificity", "precision", "f1_score", "auc"]
-METRIC_LABELS = {
-    "balanced_accuracy": "Bal. Acc.",
-    "accuracy": "Accuracy",
-    "sensitivity": "Sensitivity",
-    "specificity": "Specificity",
-    "precision": "Precision",
-    "f1_score": "F1",
-    "auc": "AUC",
+MODEL_TYPES = {
+    "tuned": "models/tuned",
+    "grouped_tuned": "models/grouped_tuned"
 }
+METRIC_KEYS = {
+    # most metric files use the `test_metrics` key for holdout results
+    "tuned": "test_metrics",
+    "grouped_tuned": "test_metrics"
+}
+OUTPUT_DIR = Path("model_comparison_tables")
+
+# Key metrics to display
+METRICS_TO_DISPLAY = [
+    "balanced_accuracy",
+    "accuracy",
+    "precision",
+    "recall",
+    "f1_score",
+    "auc" if "binary" else "None"  # Will be handled separately
+]
+
+BINARY_METRICS = [
+    "balanced_accuracy",
+    "accuracy",
+    "precision",
+    "recall",
+    "f1_score",
+    "auc"
+]
+
+MULTICLASS_METRICS = [
+    "balanced_accuracy",
+    "accuracy",
+    "precision",
+    "recall",
+    "f1_score",
+    "auc"
+]
 
 
-def _load_json(path: Path) -> dict | None:
-    if not path.exists():
-        return None
+def load_metrics(model_type, algorithm, task):
+    """Load metrics from model JSON file"""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        model_dir = MODEL_TYPES[model_type]
+        algo = algorithm.lower()
+
+        # possible filenames to try (grouped files include the '_grouped' suffix)
+        candidates = [
+            Path(model_dir) / f"{algo}_{task}_grouped_metrics.json",
+            Path(model_dir) / f"{algo}_{task}_metrics.json",
+            Path(model_dir) / f"{algo}_metrics.json",
+        ]
+
+        data = None
+        for p in candidates:
+            if p.exists():
+                with open(p, 'r') as f:
+                    data = json.load(f)
+                break
+
+        if data is None:
+            print(f"Metrics file not found for {model_type} {algorithm} {task} (looked in {model_dir})")
+            return None
+
+        return data
     except Exception as e:
-        print(f"  [WARN] Could not read {path}: {e}")
+        print(f"Error loading {model_type} {algorithm} {task}: {e}")
         return None
 
 
-def _load_metrics(model_dir: Path, algo: str, task: str) -> dict | None:
-    candidates = [
-        model_dir / f"{algo}_{task}_grouped_metrics.json",
-        model_dir / f"{algo}_{task}_metrics.json",
-        model_dir / f"{algo}_metrics.json",
-    ]
-    for p in candidates:
-        data = _load_json(p)
-        if data is not None:
-            return data
-    print(f"  [WARN] No metrics file for {model_dir.name}/{algo}/{task}")
-    return None
-
-
-def _extract_mean_std(data: dict, metric: str) -> str:
-    """
-    Extract mean ± std from cv_metrics_summary.
-
-    Ungrouped tuned  → cv_metrics_summary[metric] = {"mean": x, "std": y}
-    Grouped tuned    → cv_metrics_summary has flat keys: metric_mean / metric_std
-                       OR nested fold_metrics list from subject_cross_validation
-    """
-    cv = data.get("cv_metrics_summary", {})
-    if not cv:
-        return "N/A"
-
-    # --- nested dict format: {"mean": x, "std": y} ---
-    if metric in cv and isinstance(cv[metric], dict):
-        mean = cv[metric].get("mean")
-        std = cv[metric].get("std", 0.0) or 0.0
-        if mean is not None:
-            return f"{mean:.3f} ± {std:.3f}"
-
-    # --- flat key format: metric_mean / metric_std ---
-    mean_key = f"{metric}_mean"
-    std_key = f"{metric}_std"
-    if mean_key in cv:
-        mean = cv[mean_key]
-        std = cv.get(std_key, 0.0) or 0.0
-        if mean is not None:
-            return f"{mean:.3f} ± {std:.3f}"
-
-    # --- sensitivity / recall alias ---
-    if metric == "sensitivity":
-        alt = _extract_mean_std(data, "recall")
-        return alt if alt != "N/A" else "N/A"
-    if metric == "recall":
-        return _extract_mean_std(data, "sensitivity")
-
-    # --- fallback: compute from fold_metrics list ---
-    fold_metrics = cv.get("fold_metrics", [])
-    if fold_metrics:
-        import numpy as np
-        key = "sensitivity" if metric == "recall" else metric
-        vals = [f.get(key) for f in fold_metrics if f.get(key) is not None]
-        if vals:
-            mean = float(np.mean(vals))
-            std = float(np.std(vals))
-            return f"{mean:.3f} ± {std:.3f}"
-
-    return "N/A"
-
-
-def build_table(model_dir: Path, task: str) -> pd.DataFrame:
-    rows = []
+def create_comparison_table(model_type, task):
+    """Create a comparison table for a specific model type and task"""
+    
+    # Determine which metrics to use
+    metrics = BINARY_METRICS if task == "binary" else MULTICLASS_METRICS
+    
+    # Load metrics for all algorithms
+    table_data = []
     for algo in ALGORITHMS:
-        data = _load_metrics(model_dir, algo, task)
+        metrics_dict = load_metrics(model_type, algo, task)
+        
+        if metrics_dict is None:
+            continue
+        
         row = {"Algorithm": algo.upper()}
-        for metric in METRICS:
-            label = METRIC_LABELS[metric]
-            row[label] = _extract_mean_std(data, metric) if data else "N/A"
-        rows.append(row)
-    return pd.DataFrame(rows)
+        
+        for metric in metrics:
+            found = False
+            # Search order: cv_metrics_summary first (since we want mean +- sd), then test_metrics, then train_metrics
+            for k in ['cv_metrics_summary', 'test_metrics', 'train_metrics']:
+                if k in metrics_dict and isinstance(metrics_dict[k], dict):
+                    # handle recall/sensitivity mapping
+                    metric_key = metric
+                    if metric == "recall" and "recall" not in metrics_dict[k] and "sensitivity" in metrics_dict[k]:
+                        metric_key = "sensitivity"
+                    elif metric == "sensitivity" and "sensitivity" not in metrics_dict[k] and "recall" in metrics_dict[k]:
+                        metric_key = "recall"
+                        
+                    if metric_key in metrics_dict[k]:
+                        v = metrics_dict[k][metric_key]
+                        if isinstance(v, dict) and 'mean' in v:
+                            mean_val = v['mean']
+                            std_val = v.get('std', 0.0)
+                            if std_val is None:
+                                std_val = 0.0
+                            row[metric] = f"{mean_val:.4f} ± {std_val:.4f}"
+                        else:
+                            row[metric] = f"{v:.4f}" if isinstance(v, (int, float)) else str(v)
+                        found = True
+                        break
+            if not found:
+                row[metric] = "N/A"
+        
+        table_data.append(row)
+    
+    return pd.DataFrame(table_data)
 
 
-def render_table(df: pd.DataFrame, title: str, out_path: Path) -> None:
-    n_cols = len(df.columns)
-    n_rows = len(df)
-
-    fig_w = max(14, n_cols * 1.6)
-    fig_h = max(3, n_rows * 0.65 + 1.5)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-    ax.axis("off")
-
-    col_widths = [0.10] + [0.13] * (n_cols - 1)
-
-    tbl = ax.table(
+def render_table_as_image(df, title, filename):
+    """Render a dataframe as a table image and save as PNG"""
+    
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.axis('tight')
+    ax.axis('off')
+    
+    # Create table
+    table = ax.table(
         cellText=df.values,
         colLabels=df.columns,
-        cellLoc="center",
-        loc="center",
-        colWidths=col_widths,
+        cellLoc='center',
+        loc='center',
+        colWidths=[0.12] + [0.14] * (len(df.columns) - 1)
     )
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(9)
-    tbl.scale(1, 2.4)
-
-    for j in range(n_cols):
-        cell = tbl[(0, j)]
-        cell.set_facecolor("#4472C4")
-        cell.set_text_props(weight="bold", color="white")
-
-    for i in range(1, n_rows + 1):
-        for j in range(n_cols):
-            tbl[(i, j)].set_facecolor("#F2F2F2" if i % 2 else "#E7E6E6")
-
-    plt.title(title, fontsize=13, fontweight="bold", pad=16)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=200, bbox_inches="tight", facecolor="white")
+    
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 2.5)
+    
+    # Style header row
+    for i in range(len(df.columns)):
+        table[(0, i)].set_facecolor('#4472C4')
+        table[(0, i)].set_text_props(weight='bold', color='white')
+    
+    # Style data rows with alternating colors
+    for i in range(1, len(df) + 1):
+        for j in range(len(df.columns)):
+            if i % 2 == 0:
+                table[(i, j)].set_facecolor('#E7E6E6')
+            else:
+                table[(i, j)].set_facecolor('#F2F2F2')
+    
+    plt.title(title, fontsize=14, fontweight='bold', pad=20)
+    
+    # Save as PNG
+    output_file = OUTPUT_DIR / filename
+    plt.savefig(output_file, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close()
-    print(f"  [OK] Saved -> {out_path}")
+    
+    return str(output_file)
 
 
-def main() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    print("=" * 70)
-    print("GENERATING 4 MODEL COMPARISON TABLES")
-    print("=" * 70)
-
-    configs = [
-        (UNGROUPED_DIR, "binary",     "Ungrouped — Binary (CV mean ± std)",     "comparison_ungrouped_binary.png"),
-        (UNGROUPED_DIR, "multiclass", "Ungrouped — Multiclass (CV mean ± std)", "comparison_ungrouped_multiclass.png"),
-        (GROUPED_DIR,   "binary",     "Grouped — Binary (CV mean ± std)",       "comparison_grouped_binary.png"),
-        (GROUPED_DIR,   "multiclass", "Grouped — Multiclass (CV mean ± std)",   "comparison_grouped_multiclass.png"),
-    ]
-
-    for model_dir, task, title, filename in configs:
-        print(f"\n[{title}]")
-        df = build_table(model_dir, task)
-        if df.empty:
-            print("  [WARN] No data — skipping.")
-            continue
-        render_table(df, title, OUTPUT_DIR / filename)
-
-    print("\n" + "=" * 70)
-    print(f"Done. Tables saved to: {OUTPUT_DIR}")
-    print("=" * 70)
+def main():
+    """Main function to generate all 6 comparison tables"""
+    
+    # Create output directory
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    
+    print("=" * 80)
+    print("GENERATING MODEL COMPARISON TABLES")
+    print("=" * 80)
+    
+    table_count = 0
+    
+    for model_type in MODEL_TYPES.keys():
+        for task in TASKS:
+            table_count += 1
+            
+            # Create title
+            model_display = model_type.replace("_", " ").title()
+            task_display = task.title()
+            title = f"Model Performance Comparison - {model_display} ({task_display})"
+            
+            # Create filename
+            filename = f"comparison_{model_type}_{task}.png"
+            
+            print(f"\n[Table {table_count}/4] {model_display} - {task_display}")
+            print(f"  Creating comparison table...")
+            
+            # Create dataframe
+            df = create_comparison_table(model_type, task)
+            
+            if df.empty:
+                print(f"  [WARNING] No data found for this configuration")
+                continue
+            
+            # Render and save
+            output_file = render_table_as_image(df, title, filename)
+            print(f"  [SUCCESS] Saved: {filename}")
+            print(f"  Algorithms: {', '.join(df['Algorithm'].str.lower().tolist())}")
+            print(f"  Metrics: {len(df.columns) - 1}")
+    
+    print("\n" + "=" * 80)
+    print(f"[SUCCESS] Generated {table_count} comparison tables in: {OUTPUT_DIR}")
+    print("=" * 80)
 
 
 if __name__ == "__main__":

@@ -106,12 +106,7 @@ def main() -> None:
                 )
 
             feature_stats = summarize_feature_statistics(X_full, feature_cols)
-            sens_mean = cv_summary.get("sensitivity_mean")
-            sens_std = cv_summary.get("sensitivity_std")
-            sens_str = f"{sens_mean:.4f} ± {sens_std:.4f}" if sens_mean is not None else "N/A"
-
             print(f"\nBest CV balanced accuracy: {cv_score:.4f}")
-            print(f"CV Sensitivity: {sens_str}")
             print(f"Best params: {json.dumps(best_params, indent=2)}")
             print_feature_statistics(feature_stats, label=f"{name.upper()} grouped features")
             print("\nCross-validated event metrics:")
@@ -148,10 +143,6 @@ def main() -> None:
                     "task": task,
                     "output_path": str(output_path),
                     "cv_balanced_accuracy": cv_score,
-                    "cv_sensitivity_mean": sens_mean,
-                    "cv_sensitivity_std": sens_std,
-                    "cv_sensitivity_mean_plus_std": (sens_mean + sens_std) if sens_mean is not None else None,
-                    "cv_sensitivity_mean_minus_std": (sens_mean - sens_std) if sens_mean is not None else None,
                     "patient_balanced_accuracy": patient_metrics.get("balanced_accuracy"),
                     "patient_f1_score": patient_metrics.get("f1_score"),
                     "patient_auc": patient_metrics.get("auc"),
@@ -162,10 +153,8 @@ def main() -> None:
     print("\n=== Grouped tuning leaderboard ===")
     for rank, row in enumerate(leaderboard, start=1):
         auc_str = f"{row['patient_auc']:.4f}" if row["patient_auc"] is not None else "N/A"
-        sens_str = f"{row['cv_sensitivity_mean']:.4f} ± {row['cv_sensitivity_std']:.4f}" if row["cv_sensitivity_mean"] is not None else "N/A"
         print(
             f"{rank}. {row['model']} ({row['task']}): cv_bal_acc={row['cv_balanced_accuracy']:.4f}, "
-            f"cv_sensitivity={sens_str}, "
             f"patient_bal_acc={row['patient_balanced_accuracy']:.4f}, f1={row['patient_f1_score']:.4f}, auc={auc_str}"
         )
 
@@ -187,10 +176,6 @@ def main() -> None:
             "output_path": best["output_path"],
             "saved_path": str(best_path),
             "cv_balanced_accuracy": best["cv_balanced_accuracy"],
-            "cv_sensitivity_mean": best["cv_sensitivity_mean"],
-            "cv_sensitivity_std": best["cv_sensitivity_std"],
-            "cv_sensitivity_mean_plus_std": best["cv_sensitivity_mean_plus_std"],
-            "cv_sensitivity_mean_minus_std": best["cv_sensitivity_mean_minus_std"],
             "patient_balanced_accuracy": best["patient_balanced_accuracy"],
             "patient_f1_score": best["patient_f1_score"],
             "patient_auc": best["patient_auc"],

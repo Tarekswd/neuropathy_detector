@@ -16,7 +16,7 @@ from plot_common import PROJECT_ROOT, XML_NS, ensure_dir, setup_matplotlib, plot
 
 XML_DIR = PROJECT_ROOT / "fixed_xml"
 OUTPUT_DIR = PROJECT_ROOT / "output_plots"
-COLORMAP = plt.cm.hot
+COLORMAP = plt.cm.inferno
 
 
 def array_to_rgb(array: np.ndarray, vmax: float) -> np.ndarray:
