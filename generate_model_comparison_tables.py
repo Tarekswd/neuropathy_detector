@@ -133,13 +133,30 @@ def create_comparison_table(model_type, task):
     return pd.DataFrame(table_data)
 
 
+def _best_row_index(df):
+    """Return the 0-based data row index of the best model by balanced_accuracy (or f1_score fallback)."""
+    for col in ["balanced_accuracy", "f1_score", "accuracy"]:
+        if col not in df.columns:
+            continue
+        def _parse(val):
+            # handles "0.9123 ± 0.0045" or "0.9123" or "N/A"
+            try:
+                return float(str(val).split("±")[0].strip())
+            except (ValueError, AttributeError):
+                return -1.0
+        scores = df[col].apply(_parse)
+        if scores.max() > 0:
+            return int(scores.idxmax())
+    return None
+
+
 def render_table_as_image(df, title, filename):
     """Render a dataframe as a table image and save as PNG"""
-    
-    fig, ax = plt.subplots(figsize=(14, 6))
+
+    fig, ax = plt.subplots(figsize=(14, 4))
     ax.axis('tight')
     ax.axis('off')
-    
+
     # Create table
     table = ax.table(
         cellText=df.values,
@@ -148,31 +165,39 @@ def render_table_as_image(df, title, filename):
         loc='center',
         colWidths=[0.12] + [0.14] * (len(df.columns) - 1)
     )
-    
+
     table.auto_set_font_size(False)
     table.set_fontsize(9)
-    table.scale(1, 2.5)
-    
+    table.scale(1, 1.5)
+
     # Style header row
     for i in range(len(df.columns)):
         table[(0, i)].set_facecolor('#4472C4')
         table[(0, i)].set_text_props(weight='bold', color='white')
-    
-    # Style data rows with alternating colors
+
+    # Determine best model row (0-based index in df)
+    best_idx = _best_row_index(df)
+
+    # Style data rows with alternating colors; highlight best in red
     for i in range(1, len(df) + 1):
+        data_idx = i - 1  # df row index
+        is_best = (best_idx is not None and data_idx == best_idx)
         for j in range(len(df.columns)):
-            if i % 2 == 0:
+            if is_best:
+                table[(i, j)].set_facecolor('#C0392B')
+                table[(i, j)].set_text_props(weight='bold', color='white')
+            elif i % 2 == 0:
                 table[(i, j)].set_facecolor('#E7E6E6')
             else:
                 table[(i, j)].set_facecolor('#F2F2F2')
-    
-    plt.title(title, fontsize=14, fontweight='bold', pad=20)
-    
+
+    plt.title(title, fontsize=14, fontweight='bold', pad=10)
+
     # Save as PNG
     output_file = OUTPUT_DIR / filename
     plt.savefig(output_file, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close()
-    
+
     return str(output_file)
 
 
