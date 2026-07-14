@@ -153,49 +153,60 @@ def _best_row_index(df):
 def render_table_as_image(df, title, filename):
     """Render a dataframe as a table image and save as PNG"""
 
-    fig, ax = plt.subplots(figsize=(14, 4))
-    ax.axis('tight')
+    n_rows = len(df)
+    fig_height = 0.45 * (n_rows + 1) + 0.6  # compact: ~0.45 in per row + title room
+    fig, ax = plt.subplots(figsize=(14, fig_height))
     ax.axis('off')
 
-    # Create table
+    # Determine best model row (0-based index in df)
+    best_idx = _best_row_index(df)
+
+    # Build per-cell colours
+    cell_colors = []
+    for i in range(n_rows):
+        is_best = (best_idx is not None and i == best_idx)
+        row_colors = []
+        for _ in range(len(df.columns)):
+            if is_best:
+                row_colors.append('#C0392B')
+            elif i % 2 == 0:
+                row_colors.append('#F2F2F2')
+            else:
+                row_colors.append('#E7E6E6')
+        cell_colors.append(row_colors)
+
+    header_colors = [['#4472C4'] * len(df.columns)]
+
+    # Create table filling the full axes area (no blank space above/below)
     table = ax.table(
         cellText=df.values,
         colLabels=df.columns,
         cellLoc='center',
         loc='center',
-        colWidths=[0.12] + [0.14] * (len(df.columns) - 1)
+        cellColours=cell_colors,
+        colColours=header_colors[0],
+        colWidths=[0.12] + [0.14] * (len(df.columns) - 1),
+        bbox=[0, 0, 1, 1],   # fill the entire axes bounding box
     )
 
     table.auto_set_font_size(False)
     table.set_fontsize(9)
-    table.scale(1, 1.5)
 
-    # Style header row
-    for i in range(len(df.columns)):
-        table[(0, i)].set_facecolor('#4472C4')
-        table[(0, i)].set_text_props(weight='bold', color='white')
+    # Style header text
+    for j in range(len(df.columns)):
+        table[(0, j)].set_text_props(weight='bold', color='white')
 
-    # Determine best model row (0-based index in df)
-    best_idx = _best_row_index(df)
-
-    # Style data rows with alternating colors; highlight best in red
-    for i in range(1, len(df) + 1):
-        data_idx = i - 1  # df row index
-        is_best = (best_idx is not None and data_idx == best_idx)
+    # Style best-row text
+    if best_idx is not None:
         for j in range(len(df.columns)):
-            if is_best:
-                table[(i, j)].set_facecolor('#C0392B')
-                table[(i, j)].set_text_props(weight='bold', color='white')
-            elif i % 2 == 0:
-                table[(i, j)].set_facecolor('#E7E6E6')
-            else:
-                table[(i, j)].set_facecolor('#F2F2F2')
+            table[(best_idx + 1, j)].set_text_props(weight='bold', color='white')
 
-    plt.title(title, fontsize=14, fontweight='bold', pad=10)
+    plt.title(title, fontsize=13, fontweight='bold', pad=6)
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.88, bottom=0.01)
 
     # Save as PNG
     output_file = OUTPUT_DIR / filename
-    plt.savefig(output_file, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.savefig(output_file, dpi=300, bbox_inches='tight', pad_inches=0.05, facecolor='white')
     plt.close()
 
     return str(output_file)
